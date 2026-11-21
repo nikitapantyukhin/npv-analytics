@@ -13,8 +13,8 @@ export function Card({children, className = ''}: {children: ReactNode; className
 
 export function SectionHeader({title, side}: {title: string; side?: ReactNode}) { return <div className="section-header"><h3>{title}</h3><div className="section-side">{side}</div></div> }
 
-export function KPI({label, value, sub, tone = 'blue', icon}: {label: string; value: ReactNode; sub?: ReactNode; tone?: 'blue' | 'green' | 'violet'; icon: string}) {
-  return <div className={`kpi ${tone}`}><div className="kpi-line"><span>{label}</span><span className="kpi-icon">{icon}</span></div><div className="kpi-value">{value}</div>{sub && <div className="kpi-sub">{sub}</div>}</div>
+export function KPI({label, value, sub, tone = 'blue', icon, className = ''}: {label: string; value: ReactNode; sub?: ReactNode; tone?: 'blue' | 'green' | 'violet'; icon: string; className?: string}) {
+  return <div className={`kpi ${tone} ${className}`}><div className="kpi-line"><span>{label}</span><span className="kpi-icon">{icon}</span></div><div className="kpi-value">{value}</div>{sub && <div className="kpi-sub">{sub}</div>}</div>
 }
 
 export type Tab = {label: string; to: string; active: boolean}

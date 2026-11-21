@@ -43,5 +43,10 @@ for (const [name, path] of screens) {
     await expect(page.locator('.sidebar')).toBeVisible()
     await expect(page.locator('.topbar')).toBeVisible()
     await page.screenshot({path: `../artifacts/screenshots/${name}.png`, fullPage: true})
+    if (name === '01_overview') {
+      await page.locator('.topbar').screenshot({path: '../artifacts/screenshots/refinement_topbar.png'})
+      await page.locator('.sidebar').screenshot({path: '../artifacts/screenshots/refinement_sidebar.png'})
+      await page.locator('.current-portfolio-kpi').screenshot({path: '../artifacts/screenshots/refinement_current_portfolio.png'})
+    }
   })
 }

@@ -21,7 +21,7 @@ export function OverviewPage() {
     <div className="kpi-grid">
       <KPI label="NPV портфеля" value={result.npv ? formatMoney(String(result.npv)) : '—'} sub={result.npv ? `Методика: ${String(result.convention || 'версионируемая')}` : 'Нет полного расчёта CF + DF'} tone="green" icon="◉" />
       <KPI label="Количество сделок" value={formatCount(total)} sub={portfolio ? `${formatCount(portfolio.version.credit_count)} кредитов · ${formatCount(portfolio.version.deposit_count)} депозитов` : 'Создайте первый портфель'} icon="▣" />
-      <KPI label="Текущий портфель" value={portfolio?.name || '—'} sub={portfolio ? `ID ${portfolio.id.slice(0, 8)}` : 'Нет сохранённых версий'} icon="▤" />
+      <KPI label="Текущий портфель" value={portfolio ? <span className="current-portfolio-name" title={portfolio.name}>{portfolio.name}</span> : '—'} sub={portfolio ? undefined : 'Нет сохранённых версий'} icon="▤" className="current-portfolio-kpi" />
       <KPI label="Последний расчёт" value={portfolio?.last_run?.status || '—'} sub={portfolio?.last_run ? portfolio.last_run.type : 'Расчёты ещё не запускались'} tone="violet" icon="%" />
     </div>
     <div className="grid main-grid">
