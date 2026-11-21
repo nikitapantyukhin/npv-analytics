@@ -1,0 +1,30 @@
+{
+  "source": "quantum_cached",
+  "external_id": "1",
+  "trade_date": "2026-11-20",
+  "retrieved_at": "2026-11-21T09:59:27.144992Z",
+  "source_sha": "4823c82e8e71bcad1d7e5699ec35ff03f596fb11",
+  "convention": "QuantumTeam annual_rate_pct from MOEX G-curve; continuous-zero use is an explicit NPV Analytics assumption",
+  "rate_unit_source": "percent",
+  "points": [
+    {"bucket_code":"1d","tenor_years":"0.0028","rate_percent":"13.277648"},
+    {"bucket_code":"1m","tenor_years":"0.0417","rate_percent":"13.370115"},
+    {"bucket_code":"3m","tenor_years":"0.1667","rate_percent":"13.538418"},
+    {"bucket_code":"6m","tenor_years":"0.3750","rate_percent":"13.755074"},
+    {"bucket_code":"9m","tenor_years":"0.6250","rate_percent":"13.964514"},
+    {"bucket_code":"1y","tenor_years":"0.8750","rate_percent":"14.183519"},
+    {"bucket_code":"1.5y","tenor_years":"1.2500","rate_percent":"14.621953"},
+    {"bucket_code":"2y","tenor_years":"1.7500","rate_percent":"15.014313"},
+    {"bucket_code":"3y","tenor_years":"2.5000","rate_percent":"15.650016"},
+    {"bucket_code":"4y","tenor_years":"3.5000","rate_percent":"16.112053"},
+    {"bucket_code":"5y","tenor_years":"4.5000","rate_percent":"16.436971"},
+    {"bucket_code":"6y","tenor_years":"5.5000","rate_percent":"16.667117"},
+    {"bucket_code":"7y","tenor_years":"6.5000","rate_percent":"16.825105"},
+    {"bucket_code":"8y","tenor_years":"7.5000","rate_percent":"16.930720"},
+    {"bucket_code":"9y","tenor_years":"8.5000","rate_percent":"17.002386"},
+    {"bucket_code":"10y","tenor_years":"9.5000","rate_percent":"17.053470"},
+    {"bucket_code":"15y","tenor_years":"12.5000","rate_percent":"17.180581"},
+    {"bucket_code":"20y","tenor_years":"17.5000","rate_percent":"17.253221"},
+    {"bucket_code":"30y","tenor_years":"25.0000","rate_percent":"17.379229"}
+  ]
+}

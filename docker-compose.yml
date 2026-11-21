@@ -1,0 +1,99 @@
+name: npv-analytics
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${NPV_DOCKER_SUBNET:-172.30.17.0/24}
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-npv}
+      POSTGRES_USER: ${POSTGRES_USER:-npv}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-npv}
+    volumes:
+      - npv-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-npv} -d ${POSTGRES_DB:-npv}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - npv-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    image: npv-analytics-backend:latest
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        NOSNITCHES_SHA: 81690108afbe00b890a7f92f1e13fb125c603078
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://npv:${POSTGRES_PASSWORD:-npv}@postgres:5432/npv
+      REDIS_URL: redis://redis:6379/0
+      TASK_MODE: rq
+      CFGEN_BIN: /opt/cfgen/cfgen
+      ARTIFACTS_DIR: /app/artifacts
+      QUANTUM_BASE_URL: ${QUANTUM_BASE_URL:-http://host.docker.internal:8001}
+    volumes:
+      - npv-artifacts:/app/artifacts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    image: npv-analytics-backend:latest
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://npv:${POSTGRES_PASSWORD:-npv}@postgres:5432/npv
+      REDIS_URL: redis://redis:6379/0
+      TASK_MODE: rq
+      CFGEN_BIN: /opt/cfgen/cfgen
+      ARTIFACTS_DIR: /app/artifacts
+      QUANTUM_BASE_URL: ${QUANTUM_BASE_URL:-http://host.docker.internal:8001}
+    volumes:
+      - npv-artifacts:/app/artifacts
+    depends_on:
+      backend: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["python", "-m", "app.worker"]
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      backend: {condition: service_healthy}
+    ports:
+      - "3000:80"
+
+volumes:
+  npv-postgres:
+  npv-redis:
+  npv-artifacts:
