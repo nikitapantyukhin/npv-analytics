@@ -1,25 +1,27 @@
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
-
-const nav = [
-  ['/overview', '▣', 'Обзор'], ['/generator', '◇', 'Генератор'], ['/portfolios', '▤', 'Портфель'],
-  ['/analysis', '▥', 'Факторный анализ'], ['/curves', '⌁', 'Кривые ставок'], ['/integrations', '⛓', 'Данные и интеграции'],
-]
+import { Outlet } from 'react-router-dom'
+import { Toaster } from 'sonner'
+import { Sidebar } from './layout/Sidebar'
+import { Topbar } from './layout/Topbar'
 
 export function Layout() {
-  const location = useLocation()
-  const isActive = (path: string) => path === '/overview' ? location.pathname === path : location.pathname.startsWith(path)
-  return <div className="app-shell">
-    <aside className="sidebar">
-      <NavLink to="/overview" className="brand"><span className="brand-mark">⌁</span><span>NPV <b>Analytics</b></span></NavLink>
-      <div className="side-label">РАБОЧАЯ ОБЛАСТЬ</div>
-      <nav>{nav.map(([path, icon, label]) => <NavLink key={path} to={path} className={`nav-item ${isActive(path) ? 'active' : ''}`}><span className="nav-icon">{icon}</span><span>{label}</span></NavLink>)}</nav>
-    </aside>
-    <div className="workspace">
-      <header className="topbar">
-        <div className="topbar-left"><span className="top-brand">РАБОЧЕЕ ПРОСТРАНСТВО</span><span className="top-divider" /><span>Портфель:</span><span className="top-portfolio">Текущий сохранённый портфель <span>⌄</span></span></div>
-      </header>
-      <main className="main"><Outlet /></main>
-      <footer className="footline">NPV ANALYTICS <span>·</span> СПРИНТ 03 <span>·</span> Результаты только из backend; учебные источники маркируются</footer>
+  return (
+    <div className="flex min-h-screen max-md:flex-col">
+      <Sidebar />
+      <div className="flex-1 min-w-0 flex flex-col">
+        <Topbar />
+        <main className="flex-1 min-w-0 px-7 py-7 max-md:px-4 max-w-[1600px] w-full mx-auto">
+          <Outlet />
+        </main>
+        <footer className="px-7 pb-4 text-[9px] font-bold tracking-[0.12em] text-faint/60 uppercase max-md:px-4">
+          NPV Analytics · Спринт 03 · Результаты только из backend; учебные источники маркируются
+        </footer>
+      </div>
+      <Toaster
+        position="top-right"
+        toastOptions={{
+          style: {background: '#1D1D1D', border: '1px solid rgba(255,255,255,0.1)', color: '#F5F5F5'},
+        }}
+      />
     </div>
-  </div>
+  )
 }

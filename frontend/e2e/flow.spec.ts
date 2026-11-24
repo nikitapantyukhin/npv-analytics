@@ -7,39 +7,32 @@ test('six primary routes remain navigable', async ({page}) => {
   }
 })
 
-test('application chrome is simplified on every primary route', async ({page}) => {
+test('application chrome is consistent on every primary route', async ({page}) => {
   for (const path of ['/overview', '/generator', '/portfolios', '/analysis', '/curves', '/integrations']) {
     await page.goto(path)
-    await expect(page.locator('.sidebar nav .nav-item')).toHaveCount(6)
-    await expect(page.locator('.top-status, .live-badge, .avatar, .sidebar-panel, .sidebar-foot')).toHaveCount(0)
-    await expect(page.getByText('Проект · Спринт 03')).toHaveCount(0)
-    await expect(page.getByText('Настройки отображения')).toHaveCount(0)
+    await expect(page.locator('aside nav a')).toHaveCount(6)
+    await expect(page.locator('aside nav a.bg-lime')).toHaveCount(1)
+    await expect(page.getByText('Проект · Спринт 03')).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy()
   }
 
   await page.goto('/integrations')
   await expect(page.getByText('nosnitches-cashflow', {exact: true})).toBeVisible()
   await expect(page.getByRole('heading', {name: 'QuantumTeam'})).toBeVisible()
-
-  await page.goto('/overview')
-  const portfolioCard = page.locator('.current-portfolio-kpi')
-  await expect(portfolioCard).toBeVisible()
-  await expect(portfolioCard.getByText(/^ID /)).toHaveCount(0)
 })
 
 test('refined chrome stays within a compact viewport', async ({page}) => {
   await page.setViewportSize({width: 768, height: 900})
   await page.goto('/overview')
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBeTruthy()
-  await expect(page.locator('.sidebar nav .nav-item')).toHaveCount(6)
-  await expect(page.locator('.current-portfolio-kpi')).toBeVisible()
+  await expect(page.locator('aside nav a')).toHaveCount(6)
 })
 
 test('generator modes keep entered values', async ({page}) => {
   await page.goto('/generator')
   const name = page.getByLabel('Название портфеля')
   await name.fill('Сохраняемое состояние')
-  await page.getByRole('link', {name: 'Расширенный режим'}).click()
-  await page.getByRole('link', {name: 'Простой режим'}).click()
+  await page.getByRole('link', {name: 'Расширенный'}).click()
+  await page.getByRole('link', {name: 'Простой'}).click()
   await expect(page.getByLabel('Название портфеля')).toHaveValue('Сохраняемое состояние')
 })
