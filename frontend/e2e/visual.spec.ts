@@ -40,8 +40,8 @@ const screens: [string, string][] = [
 for (const [name, path] of screens) {
   test(`${name} renders at 1600x1000`, async ({page}) => {
     await page.goto(path.replace('{portfolioId}', portfolioId).replace('{dealId}', dealId))
-    await expect(page.locator('.sidebar')).toBeVisible()
-    await expect(page.locator('.topbar')).toBeVisible()
+    await expect(page.locator('aside').first()).toBeVisible()
+    await expect(page.locator('header').first()).toBeVisible()
     await page.screenshot({path: `../artifacts/screenshots/${name}.png`, fullPage: true})
   })
 }

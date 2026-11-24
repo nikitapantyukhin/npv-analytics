@@ -1,53 +1,366 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
+import { useForm, Controller } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { toast } from 'sonner'
+import { AlertTriangle, Check, CircleAlert, Coins, Dices, Landmark, Layers, Sparkles, X } from 'lucide-react'
 import { api, formatCount } from '../lib/api'
-import { Bar, Button, Card, ErrorState, Field, Input, PageHeader, SectionHeader, Select, Tabs } from '../components/ui'
+import { Badge, Button, Card, CardHeader, ErrorState, Field, Input, PageHeader, SectionHeader, Select, Tabs } from '../components/ui'
+import { Chart } from '../components/charts/Chart'
+import { chartColors, roundedBarSeries } from '../components/charts/chartTheme'
+import { cn } from '../lib/utils'
 
 type Generated = {status: string; error_summary?: string; result?: {portfolio_id: string; credit_count: number; deposit_count: number}}
+
+const schema = z.object({
+  name: z.string().min(1, 'Укажите название'),
+  portfolio_type: z.enum(['mixed', 'credit', 'deposit']),
+  count: z.number({error: 'Укажите число'}).int().min(1, 'Минимум 1 сделка').max(100000, 'Максимум 100 000'),
+  valuation_date: z.string().min(1, 'Укажите дату'),
+  seed: z.number({error: 'Укажите число'}).int(),
+  credit_share: z.number().min(0).max(100),
+  min_amount: z.number({error: 'Укажите число'}).positive(),
+  max_amount: z.number({error: 'Укажите число'}).positive(),
+  min_term_months: z.number({error: 'Укажите число'}).int().positive(),
+  max_term_months: z.number({error: 'Укажите число'}).int().positive(),
+  min_rate_percent: z.number({error: 'Укажите число'}).min(0),
+  max_rate_percent: z.number({error: 'Укажите число'}).min(0),
+  fixed_share: z.number().min(0).max(100),
+  amount_distribution: z.enum(['lognormal', 'uniform', 'normal']),
+}).refine(values => values.min_amount < values.max_amount, {message: 'Минимум должен быть меньше максимума', path: ['max_amount']})
+  .refine(values => values.min_term_months < values.max_term_months, {message: 'Срок «от» меньше срока «до»', path: ['max_term_months']})
+  .refine(values => values.min_rate_percent < values.max_rate_percent, {message: 'Минимальная ставка меньше максимальной', path: ['max_rate_percent']})
+
+type FormValues = z.infer<typeof schema>
+
+const defaultValues: FormValues = {
+  name: 'Синтетический портфель',
+  portfolio_type: 'mixed',
+  count: 1000,
+  valuation_date: new Date().toISOString().slice(0, 10),
+  seed: 42,
+  credit_share: 70,
+  min_amount: 100000,
+  max_amount: 5000000,
+  min_term_months: 6,
+  max_term_months: 60,
+  min_rate_percent: 8,
+  max_rate_percent: 24,
+  fixed_share: 70,
+  amount_distribution: 'lognormal',
+}
+
+const portfolioTypes = [
+  {value: 'credit', label: 'Кредитный', hint: 'Только выдачи', icon: Landmark},
+  {value: 'deposit', label: 'Депозитный', hint: 'Только привлечение', icon: Coins},
+  {value: 'mixed', label: 'Смешанный', hint: 'Кредиты и депозиты', icon: Layers},
+] as const
 
 export function GeneratorPage() {
   const [params] = useSearchParams()
   const advanced = params.get('mode') === 'advanced'
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const [form, setForm] = useState({name: 'Синтетический портфель', portfolio_type: 'mixed', count: 1000, valuation_date: new Date().toISOString().slice(0, 10), seed: 42, credit_share: 70, min_amount: 100000, max_amount: 5000000, min_term_months: 6, max_term_months: 60, min_rate_percent: 8, max_rate_percent: 24, fixed_share: 70, amount_distribution: 'lognormal'})
-  const update = (field: string, value: string | number) => setForm(current => ({...current, [field]: value}))
-  const generation = useMutation({mutationFn: async () => {
-    let run = await api<Generated & {run_id: string}>('/portfolios/generate', {method: 'POST', body: JSON.stringify({...form, count: Number(form.count), seed: Number(form.seed), credit_share: Number(form.credit_share), min_amount: String(form.min_amount), max_amount: String(form.max_amount), min_term_months: Number(form.min_term_months), max_term_months: Number(form.max_term_months), min_rate_percent: String(form.min_rate_percent), max_rate_percent: String(form.max_rate_percent), fixed_share: Number(form.fixed_share)})})
-    for (let attempt = 0; run.status === 'queued' || run.status === 'running'; attempt += 1) {
-      if (attempt >= 120) throw new Error('Генерация продолжается в фоне. Откройте «Запуски расчётов».')
-      await new Promise(resolve => window.setTimeout(resolve, 500))
-      run = await api<Generated & {run_id: string}>(`/runs/${run.run_id}`)
-    }
-    return run
-  }, onSuccess: async data => {await queryClient.invalidateQueries({queryKey: ['portfolios']}); if (data.result?.portfolio_id) navigate(`/portfolios/${data.result.portfolio_id}`)}})
-  const split = useMemo(() => {const credit = form.portfolio_type === 'credit' ? 100 : form.portfolio_type === 'deposit' ? 0 : Number(form.credit_share); const creditCount = Math.round(Number(form.count) * credit / 100); return {credit, creditCount, deposits: Number(form.count) - creditCount}}, [form])
-  return <>
-    <PageHeader crumb="ГЕНЕРАТОР СДЕЛОК" title="Генератор сделок" description={advanced ? 'Детальная настройка распределений и условий кредитных и депозитных сделок' : 'Сформируйте синтетический портфель с контролируемой структурой'} actions={advanced ? <Button primary disabled={generation.isPending} onClick={() => generation.mutate()}>✦ Сгенерировать</Button> : <Link to="/integrations?tab=runs"><Button>История генераций</Button></Link>} />
-    <Tabs items={[{label: 'Простой режим', to: '/generator', active: !advanced}, {label: 'Расширенный режим', to: '/generator?mode=advanced', active: advanced}]} />
-    {generation.error && <ErrorState message={(generation.error as Error).message} />}
-    {advanced ? <Advanced form={form} update={update} split={split} onGenerate={() => generation.mutate()} pending={generation.isPending} /> : <Simple form={form} update={update} split={split} onGenerate={() => generation.mutate()} pending={generation.isPending} />}
-  </>
+  const form = useForm<FormValues>({resolver: zodResolver(schema), defaultValues, mode: 'onChange'})
+  const values = form.watch()
+
+  const generation = useMutation({
+    mutationFn: async (payload: FormValues) => {
+      let run = await api<Generated & {run_id: string}>('/portfolios/generate', {
+        method: 'POST',
+        body: JSON.stringify({...payload, min_amount: String(payload.min_amount), max_amount: String(payload.max_amount), min_rate_percent: String(payload.min_rate_percent), max_rate_percent: String(payload.max_rate_percent)}),
+      })
+      for (let attempt = 0; run.status === 'queued' || run.status === 'running'; attempt += 1) {
+        if (attempt >= 120) throw new Error('Генерация продолжается в фоне. Откройте «Запуски расчётов».')
+        await new Promise(resolve => window.setTimeout(resolve, 500))
+        run = await api<Generated & {run_id: string}>(`/runs/${run.run_id}`)
+      }
+      return run
+    },
+    onSuccess: async data => {
+      await queryClient.invalidateQueries({queryKey: ['portfolios']})
+      toast.success('Портфель сгенерирован', {description: `${formatCount((data.result?.credit_count || 0) + (data.result?.deposit_count || 0))} сделок сохранено`})
+      if (data.result?.portfolio_id) navigate(`/portfolios/${data.result.portfolio_id}`)
+    },
+    onError: error => toast.error('Генерация не удалась', {description: (error as Error).message}),
+  })
+
+  const split = useMemo(() => {
+    const credit = values.portfolio_type === 'credit' ? 100 : values.portfolio_type === 'deposit' ? 0 : Number(values.credit_share)
+    const creditCount = Math.round(Number(values.count) * credit / 100)
+    return {credit, creditCount, deposits: Number(values.count) - creditCount}
+  }, [values.portfolio_type, values.credit_share, values.count])
+
+  const submit = form.handleSubmit(data => generation.mutate(data))
+
+  return (
+    <>
+      <PageHeader
+        crumb="ГЕНЕРАТОР СДЕЛОК"
+        title="Генератор сделок"
+        description={advanced ? 'Детальная настройка распределений и условий кредитных и депозитных сделок' : 'Сформируйте синтетический портфель с контролируемой структурой'}
+        actions={advanced
+          ? <Button variant="primary" size="lg" disabled={generation.isPending} onClick={submit}><Sparkles size={17} strokeWidth={2.2} /> Сгенерировать</Button>
+          : <Link to="/integrations?tab=runs"><Button variant="secondary">История генераций</Button></Link>}
+      />
+      <Tabs items={[{label: 'Простой', to: '/generator', active: !advanced}, {label: 'Расширенный', to: '/generator?mode=advanced', active: advanced}]} />
+      {generation.error && <div className="mb-5"><ErrorState message={(generation.error as Error).message} /></div>}
+      {advanced
+        ? <Advanced form={form} onGenerate={submit} pending={generation.isPending} />
+        : <Simple form={form} split={split} onGenerate={submit} pending={generation.isPending} />}
+    </>
+  )
 }
 
-type FormState = Record<string, string | number>
-type Split = {credit: number; creditCount: number; deposits: number}
-type Props = {form: FormState; update: (field: string, value: string | number) => void; split: Split; onGenerate: () => void; pending: boolean}
+type Form = ReturnType<typeof useForm<FormValues>>
+type Props = {form: Form; onGenerate: () => void; pending: boolean}
 
-function Simple({form, update, split, onGenerate, pending}: Props) {
-  return <div className="grid generator-grid"><Card><SectionHeader title="Основные параметры"/><div className="form-grid">
-    <Field label="Название портфеля"><Input value={form.name} onChange={e => update('name', e.target.value)}/></Field>
-    <Field label="Количество сделок"><Input type="number" min="1" max="100000" value={form.count} onChange={e => update('count', Number(e.target.value))}/></Field>
-    <Field label="Тип портфеля"><Select value={form.portfolio_type} onChange={e => update('portfolio_type', e.target.value)}><option value="mixed">Смешанный · кредиты и депозиты</option><option value="credit">Только кредиты</option><option value="deposit">Только депозиты</option></Select></Field>
-    <Field label="Дата оценки"><Input type="date" value={form.valuation_date} onChange={e => update('valuation_date', e.target.value)}/></Field>
-    <Field label="Модель сумм"><Select value={form.amount_distribution} onChange={e => update('amount_distribution', e.target.value)}><option value="lognormal">Логнормальная</option><option value="uniform">Равномерная</option><option value="normal">Нормальная</option></Select></Field>
-    <Field label="Seed генератора"><Input type="number" value={form.seed} onChange={e => update('seed', Number(e.target.value))}/></Field>
-  </div><div className="divider"/><SectionHeader title="Соотношение инструментов"/><label className="range-row"><span>Кредиты</span><strong>{split.credit}%</strong><input type="range" min="0" max="100" value={split.credit} disabled={form.portfolio_type !== 'mixed'} onChange={e => update('credit_share', Number(e.target.value))}/><span>Депозиты</span><strong>{100 - split.credit}%</strong></label><div className="footer-actions"><Button onClick={() => undefined}>Проверить настройки</Button><Button primary disabled={pending} onClick={onGenerate}>{pending ? 'Генерация…' : '✦ Сгенерировать портфель'}</Button></div></Card>
-    <Card><SectionHeader title="Предварительная структура" side={<span className="badge blue">По настройкам</span>}/><div className="stat-3"><div><span>Сделок</span><b>{formatCount(Number(form.count))}</b></div><div><span>Кредиты</span><b>{formatCount(split.creditCount)}</b></div><div><span>Депозиты</span><b>{formatCount(split.deposits)}</b></div></div><SectionHeader title="Типы графиков платежей"/><div className="bar-list"><Bar label="Аннуитетный (ANN)" value={50}/><Bar label="Равные доли (RGM)" value={30} tone="purple"/><Bar label="SIMPLE" value={20} tone="mint"/></div><SectionHeader title="Тип процентной ставки"/><div className="bar-list"><Bar label="FIXED" value={Number(form.fixed_share)}/><Bar label="FLOAT" value={100 - Number(form.fixed_share)} tone="mint"/></div><div className="note"><b>Воспроизводимый режим</b><p>Одинаковые настройки, seed и версия алгоритма дают тот же канонический hash. Все поля повторно проверяются backend.</p></div></Card></div>
+function TypeCards({form}: {form: Form}) {
+  return (
+    <Controller
+      control={form.control}
+      name="portfolio_type"
+      render={({field}) => (
+        <div className="grid grid-cols-3 gap-2.5 max-sm:grid-cols-1">
+          {portfolioTypes.map(type => {
+            const selected = field.value === type.value
+            return (
+              <button
+                key={type.value}
+                type="button"
+                onClick={() => field.onChange(type.value)}
+                className={cn(
+                  'rounded-panel border p-3.5 text-left transition-all duration-200 cursor-pointer',
+                  selected ? 'border-lime bg-lime/8 shadow-[0_0_0_3px_rgba(198,242,78,0.12)]' : 'border-border bg-field hover:border-border-strong',
+                )}
+              >
+                <type.icon size={19} strokeWidth={1.8} className={selected ? 'text-lime' : 'text-muted'} />
+                <div className={cn('text-[12.5px] font-semibold mt-2', selected ? 'text-foreground' : 'text-muted')}>{type.label}</div>
+                <div className="text-[10.5px] text-faint mt-0.5">{type.hint}</div>
+              </button>
+            )
+          })}
+        </div>
+      )}
+    />
+  )
 }
 
-function Advanced({form, update, onGenerate, pending}: Props) {
-  const bars = [18, 38, 76, 96, 84, 65, 49, 34, 24, 15, 9, 5]
-  return <><div className="subnav"><span className="on">Суммы и сроки</span><span>Графики платежей</span><span>Ставки</span><span title="Контракт поддерживает prepayment_schedule">Досрочки</span><span title="Включаются только после проверки полей cfgen">Субсидии</span><span>Экспертные</span></div><div className="grid generator-grid"><Card><SectionHeader title="Распределение сумм" side={<span className="badge blue">Параметрическая</span>}/><div className="form-grid"><Field label="Минимальная сумма"><Input type="number" value={form.min_amount} onChange={e => update('min_amount', Number(e.target.value))}/></Field><Field label="Максимальная сумма"><Input type="number" value={form.max_amount} onChange={e => update('max_amount', Number(e.target.value))}/></Field><Field label="Модель распределения"><Select value={form.amount_distribution} onChange={e => update('amount_distribution', e.target.value)}><option value="lognormal">Логнормальная</option><option value="uniform">Равномерная</option><option value="normal">Нормальная</option></Select></Field><Field label="Seed"><Input type="number" value={form.seed} onChange={e => update('seed', Number(e.target.value))}/></Field></div><SectionHeader title="Диапазон ставок"/><div className="form-grid"><Field label="Минимальная ставка, %"><Input type="number" step="0.1" value={form.min_rate_percent} onChange={e => update('min_rate_percent', Number(e.target.value))}/></Field><Field label="Максимальная ставка, %"><Input type="number" step="0.1" value={form.max_rate_percent} onChange={e => update('max_rate_percent', Number(e.target.value))}/></Field></div><div className="divider"/><SectionHeader title="Распределение сроков"/><div className="form-grid"><Field label="От, месяцев"><Input type="number" value={form.min_term_months} onChange={e => update('min_term_months', Number(e.target.value))}/></Field><Field label="До, месяцев"><Input type="number" value={form.max_term_months} onChange={e => update('max_term_months', Number(e.target.value))}/></Field></div><div className="success-line">✓ Диапазоны и доли проверит backend перед сохранением</div><div className="footer-actions"><Button primary disabled={pending} onClick={onGenerate}>{pending ? 'Генерация…' : 'Сгенерировать'}</Button></div></Card><Card><SectionHeader title="Предпросмотр распределения сумм" side="Форма распределения"/><div className="histogram">{bars.map((height, index) => <div key={index} className="hist-bar" style={{height: `${height}%`}}/>)}</div><div className="axis"><span>{formatCount(Number(form.min_amount))} ₽</span><span>{formatCount(Number(form.max_amount))} ₽</span></div><SectionHeader title="Сроки кредитования" side="Настроенный диапазон"/><div className="bar-list"><Bar label={`от ${form.min_term_months} мес.`} value={25}/><Bar label="Средний диапазон" value={50}/><Bar label={`до ${form.max_term_months} мес.`} value={25} tone="purple"/></div><div className="note"><b>Ограничения внешнего движка</b><p>FLOAT использует только CBKEY1M. Для SIMPLE формируется явное погашение в конце срока. Субсидии не активируются без подтверждённого контракта полей.</p></div></Card></div></>
+function SeedField({form, className}: {form: Form; className?: string}) {
+  return (
+    <Field label="Seed генератора" error={form.formState.errors.seed?.message} className={className}>
+      <div className="relative">
+        <Input type="number" {...form.register('seed', {valueAsNumber: true})} className="pr-11" />
+        <button
+          type="button"
+          title="Случайный seed"
+          onClick={() => form.setValue('seed', Math.floor(Math.random() * 1_000_000), {shouldValidate: true})}
+          className="absolute right-1.5 top-1/2 -translate-y-1/2 grid place-items-center w-7 h-7 rounded-lg bg-lime/12 text-lime cursor-pointer border-0 hover:bg-lime/25 transition-colors"
+        >
+          <Dices size={14} />
+        </button>
+      </div>
+    </Field>
+  )
+}
+
+function ShareSlider({form, split}: {form: Form; split: {credit: number; creditCount: number; deposits: number}}) {
+  const disabled = form.watch('portfolio_type') !== 'mixed'
+  const credit = split.credit
+  return (
+    <div>
+      <div className="flex justify-between text-xs text-muted mb-1">
+        <span>Кредиты</span>
+        <b className="text-foreground tnum">{credit}%</b>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={100}
+        value={credit}
+        disabled={disabled}
+        className="lime-range"
+        style={{'--fill': `${credit}%`} as React.CSSProperties}
+        onChange={event => form.setValue('credit_share', Number(event.target.value), {shouldValidate: true})}
+      />
+      <div className="flex justify-between text-xs text-muted mt-1">
+        <span>Депозиты</span>
+        <b className="text-foreground tnum">{100 - credit}%</b>
+      </div>
+    </div>
+  )
+}
+
+function PreviewBar({label, value, tone = 'lime'}: {label: string; value: number; tone?: 'lime' | 'olive' | 'steel'}) {
+  const color = tone === 'lime' ? chartColors.lime : tone === 'olive' ? chartColors.olive : chartColors.steel
+  return (
+    <div>
+      <div className="flex justify-between text-[11px] text-muted mb-1.5">
+        <span>{label}</span>
+        <b className="text-foreground tnum">{value}%</b>
+      </div>
+      <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-500" style={{width: `${Math.min(100, Math.max(0, value))}%`, background: color}} />
+      </div>
+    </div>
+  )
+}
+
+function Simple({form, split, onGenerate, pending}: Props & {split: {credit: number; creditCount: number; deposits: number}}) {
+  const values = form.watch()
+  const errors = form.formState.errors
+  const checks = [
+    {label: `Количество сделок: ${formatCount(Number(values.count) || 0)}`, ok: Number(values.count) >= 1 && Number(values.count) <= 100000},
+    {label: 'Диапазон сумм задан корректно', ok: Number(values.min_amount) < Number(values.max_amount)},
+    {label: 'Диапазон сроков задан корректно', ok: Number(values.min_term_months) < Number(values.max_term_months)},
+    {label: 'Диапазон ставок задан корректно', ok: Number(values.min_rate_percent) < Number(values.max_rate_percent)},
+    {label: 'Seed задан — результат воспроизводим', ok: Number.isFinite(Number(values.seed))},
+  ]
+  const ready = checks.every(check => check.ok)
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-[1.18fr_0.82fr] gap-5 items-start">
+      <Card>
+        <CardHeader title="Основные параметры" />
+        <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
+          <Field label="Название портфеля" error={errors.name?.message}><Input {...form.register('name')} /></Field>
+          <Field label="Количество сделок" error={errors.count?.message}><Input type="number" min={1} max={100000} {...form.register('count', {valueAsNumber: true})} /></Field>
+          <div className="col-span-2 max-md:col-span-1">
+            <span className="block text-xs font-medium text-muted mb-2">Тип портфеля</span>
+            <TypeCards form={form} />
+          </div>
+          <Field label="Дата оценки" error={errors.valuation_date?.message}><Input type="date" {...form.register('valuation_date')} /></Field>
+          <Field label="Модель сумм">
+            <Select {...form.register('amount_distribution')}>
+              <option value="lognormal">Логнормальная</option>
+              <option value="uniform">Равномерная</option>
+              <option value="normal">Нормальная</option>
+            </Select>
+          </Field>
+          <SeedField form={form} className="col-span-2 max-md:col-span-1" />
+        </div>
+        <div className="border-t border-border my-5" />
+        <SectionHeader title="Соотношение инструментов" />
+        <ShareSlider form={form} split={split} />
+        <div className="flex justify-end gap-2.5 mt-6">
+          <Button variant="secondary" type="button" onClick={() => form.trigger()}>Проверить настройки</Button>
+          <Button variant="primary" size="lg" disabled={pending || !ready} onClick={onGenerate}>
+            <Sparkles size={17} strokeWidth={2.2} /> {pending ? 'Генерация…' : 'Сгенерировать портфель'}
+          </Button>
+        </div>
+      </Card>
+      <Card>
+        <CardHeader title="Предварительная проверка" side={<Badge tone={ready ? 'lime' : 'amber'}>{ready ? 'Готово к генерации' : 'Проверьте параметры'}</Badge>} />
+        <div className="flex flex-col gap-2.5 mb-5">
+          {checks.map(check => (
+            <div key={check.label} className="flex items-center gap-2.5 text-[12.5px]">
+              <span className={cn('grid place-items-center w-5 h-5 rounded-full shrink-0', check.ok ? 'bg-lime/12 text-lime' : 'bg-red/12 text-red')}>
+                {check.ok ? <Check size={12} strokeWidth={3} /> : <X size={12} strokeWidth={3} />}
+              </span>
+              <span className={check.ok ? 'text-muted' : 'text-red'}>{check.label}</span>
+            </div>
+          ))}
+        </div>
+        <div className="grid grid-cols-3 gap-2.5 mb-5">
+          {[{label: 'Сделок', value: formatCount(Number(values.count) || 0)}, {label: 'Кредиты', value: formatCount(split.creditCount)}, {label: 'Депозиты', value: formatCount(split.deposits)}].map(stat => (
+            <div key={stat.label} className="rounded-xl bg-card2 border border-border px-3 py-3 flex flex-col gap-1">
+              <span className="text-[10.5px] text-faint">{stat.label}</span>
+              <b className="text-[17px] tnum">{stat.value}</b>
+            </div>
+          ))}
+        </div>
+        <SectionHeader title="Тип процентной ставки" />
+        <div className="flex flex-col gap-3.5">
+          <PreviewBar label="FIXED" value={Number(values.fixed_share)} />
+          <PreviewBar label="FLOAT · CBKEY1M" value={100 - Number(values.fixed_share)} tone="olive" />
+        </div>
+        <div className="rounded-panel bg-card2 border border-border p-3.5 mt-5">
+          <b className="text-xs">Воспроизводимый режим</b>
+          <p className="text-[11px] leading-relaxed text-muted mt-1 mb-0">Одинаковые настройки, seed и версия алгоритма дают тот же канонический hash. Все поля повторно проверяются backend.</p>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+function Advanced({form, onGenerate, pending}: Props) {
+  const values = form.watch()
+  const errors = form.formState.errors
+  const histogram = [18, 38, 76, 96, 84, 65, 49, 34, 24, 15, 9, 5]
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-[1.18fr_0.82fr] gap-5 items-start">
+      <Card>
+        <CardHeader title="Распределение сумм" side={<Badge tone="outline">Параметрическая</Badge>} />
+        <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
+          <Field label="Минимальная сумма" error={errors.min_amount?.message}><Input type="number" {...form.register('min_amount', {valueAsNumber: true})} /></Field>
+          <Field label="Максимальная сумма" error={errors.max_amount?.message}><Input type="number" {...form.register('max_amount', {valueAsNumber: true})} /></Field>
+          <Field label="Модель распределения">
+            <Select {...form.register('amount_distribution')}>
+              <option value="lognormal">Логнормальная</option>
+              <option value="uniform">Равномерная</option>
+              <option value="normal">Нормальная</option>
+            </Select>
+          </Field>
+          <SeedField form={form} />
+        </div>
+        <div className="border-t border-border my-5" />
+        <SectionHeader title="Диапазон ставок" />
+        <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
+          <Field label="Минимальная ставка, %" error={errors.min_rate_percent?.message}><Input type="number" step="0.1" {...form.register('min_rate_percent', {valueAsNumber: true})} /></Field>
+          <Field label="Максимальная ставка, %" error={errors.max_rate_percent?.message}><Input type="number" step="0.1" {...form.register('max_rate_percent', {valueAsNumber: true})} /></Field>
+        </div>
+        <div className="border-t border-border my-5" />
+        <SectionHeader title="Распределение сроков" />
+        <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
+          <Field label="От, месяцев" error={errors.min_term_months?.message}><Input type="number" {...form.register('min_term_months', {valueAsNumber: true})} /></Field>
+          <Field label="До, месяцев" error={errors.max_term_months?.message}><Input type="number" {...form.register('max_term_months', {valueAsNumber: true})} /></Field>
+        </div>
+        <div className="flex items-center gap-2 text-[11px] text-lime mt-4">
+          <Check size={14} strokeWidth={2.5} /> Диапазоны и доли проверит backend перед сохранением
+        </div>
+        <div className="flex justify-end gap-2.5 mt-6">
+          <Button variant="primary" size="lg" disabled={pending} onClick={onGenerate}>
+            <Sparkles size={17} strokeWidth={2.2} /> {pending ? 'Генерация…' : 'Сгенерировать'}
+          </Button>
+        </div>
+      </Card>
+      <Card>
+        <CardHeader title="Предпросмотр распределения сумм" side={<Badge tone="outline">Форма распределения</Badge>} />
+        <Chart
+          height={190}
+          option={{
+            grid: {left: 0, right: 0, top: 10, bottom: 0},
+            legend: {show: false},
+            xAxis: {show: false, type: 'category', data: histogram.map((_, index) => String(index + 1))},
+            yAxis: {show: false, type: 'value'},
+            tooltip: {trigger: 'axis', formatter: params => `Интервал ${(params as {dataIndex: number}[])[0].dataIndex + 1} · условная плотность`},
+            series: [roundedBarSeries('Плотность', histogram, chartColors.lime, {barMaxWidth: 18})],
+          }}
+        />
+        <div className="flex justify-between text-[10.5px] text-faint mt-2 mb-6">
+          <span>{formatCount(Number(values.min_amount) || 0)} ₽</span>
+          <span>{formatCount(Number(values.max_amount) || 0)} ₽</span>
+        </div>
+        <SectionHeader title="Сроки кредитования" side="Настроенный диапазон" />
+        <div className="flex flex-col gap-3.5">
+          <PreviewBar label={`от ${values.min_term_months} мес.`} value={25} tone="steel" />
+          <PreviewBar label="Средний диапазон" value={50} />
+          <PreviewBar label={`до ${values.max_term_months} мес.`} value={25} tone="olive" />
+        </div>
+        <div className="rounded-panel bg-card2 border border-border p-3.5 mt-5 flex gap-3">
+          <AlertTriangle size={16} className="text-amber shrink-0 mt-0.5" strokeWidth={1.8} />
+          <div>
+            <b className="text-xs">Ограничения внешнего движка</b>
+            <p className="text-[11px] leading-relaxed text-muted mt-1 mb-0">FLOAT использует только CBKEY1M. Для SIMPLE формируется явное погашение в конце срока. Субсидии не активируются без подтверждённого контракта полей.</p>
+          </div>
+        </div>
+        {Object.keys(errors).length > 0 && (
+          <div className="flex items-center gap-2 text-[11px] text-red mt-4">
+            <CircleAlert size={14} /> Исправьте отмеченные поля перед генерацией
+          </div>
+        )}
+      </Card>
+    </div>
+  )
 }
