@@ -14,11 +14,12 @@ class Settings(BaseSettings):
     cfgen_timeout_seconds: int = 180
     quantum_base_url: str = "http://localhost:8001"
     quantum_timeout_seconds: int = 15
+    quantum_calculation_timeout_seconds: int = 90
     artifacts_dir: Path = Path("artifacts")
     cors_origins: str = "http://localhost:3000"
 
-    nosnitches_sha: str = "81690108afbe00b890a7f92f1e13fb125c603078"
-    quantum_sha: str = "4823c82e8e71bcad1d7e5699ec35ff03f596fb11"
+    nosnitches_sha: str = "77ca4571e2b355b75919efa6259b9e559c9d1121"
+    quantum_sha: str = "3f0bbfee881014f2101a5beaca65d95a32156817"
     generator_version: str = "npv-generator/1.0.0"
     valuation_method: str = "NPV-CONTINUOUS-ZERO-ACT365-v1"
 

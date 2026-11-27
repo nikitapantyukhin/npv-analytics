@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import os
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from app.core.config import get_settings
@@ -20,12 +22,12 @@ class CashflowResult:
     issues: list[dict]
     stdout: str
     stderr: str
-    artifact_dir: Path
+    artifact_dir: Path | None
     binary_checksum: str | None
 
 
 class CashflowEngineAdapter:
-    def __init__(self, binary: str | None = None, timeout: int | None = None):
+    def __init__(self, binary: str | None = None, timeout: int | None = None) -> None:
         settings = get_settings()
         self.binary = Path(binary or settings.cfgen_bin)
         self.timeout = timeout or settings.cfgen_timeout_seconds
@@ -62,20 +64,32 @@ class CashflowEngineAdapter:
                 "binary_checksum": self.checksum(),
             }
 
-    def calculate(self, rows: list[dict], rates_path: Path, run_id: str, *, extra_args: list[str] | None = None) -> CashflowResult:
+    def calculate(
+        self,
+        rows: list[dict],
+        rates: Path | bytes,
+        run_id: str,
+        *,
+        report_date: date | None = None,
+        forecast: bytes | None = None,
+        scenario: str = "base",
+        artifacts_dir: Path | None = None,
+    ) -> CashflowResult:
         issues = self.validate_deals(rows)
         if any(issue["severity"] == "error" for issue in issues):
-            return CashflowResult("failed", [], issues, "", "Серверная валидация не пройдена", Path(""), self.checksum())
+            return CashflowResult("failed", [], issues, "", "Серверная валидация не пройдена", None, self.checksum())
         if not self.available():
             return CashflowResult(
                 "failed", [],
                 [{"deal_id": None, "severity": "error", "code": "CFGEN_UNAVAILABLE", "field": None, "message": f"Бинарник cfgen не найден: {self.binary}"}],
-                "", "", Path(""), None,
+                "", "", None, None,
             )
         settings = get_settings()
-        root = settings.artifacts_dir.resolve() / run_id
+        root = (artifacts_dir or settings.artifacts_dir).resolve() / run_id
         root.mkdir(parents=True, exist_ok=False)
         deals_path = root / "deals.csv"
+        rates_path = root / "key_rate.csv"
+        rates_path.write_bytes(rates.read_bytes() if isinstance(rates, Path) else rates)
         out_dir = root / "output"
         summary_path = root / "summary.json"
         with deals_path.open("w", newline="", encoding="utf-8") as target:
@@ -86,12 +100,19 @@ class CashflowEngineAdapter:
             str(self.binary), "run", "--deals", str(deals_path), "--rates", str(rates_path),
             "--out-dir", str(out_dir), "--summary", str(summary_path),
         ]
-        if extra_args:
-            command.extend(extra_args)
+        if report_date is not None:
+            command.extend(["--report-date", report_date.isoformat()])
+        if forecast is not None:
+            forecast_path = root / "curves.csv"
+            forecast_path.write_bytes(forecast)
+            command.extend(["--curves", str(forecast_path)])
+            headers = next(csv.reader(io.StringIO(forecast.decode("utf-8-sig"))))
+            if "scenario" in headers:
+                command.extend(["--scenario", scenario])
         try:
             process = subprocess.run(command, capture_output=True, text=True, timeout=self.timeout, check=False)
-        except subprocess.TimeoutExpired as exc:
-            return CashflowResult("failed", [], [{"deal_id": None, "severity": "error", "code": "CFGEN_TIMEOUT", "field": None, "message": f"Таймаут {self.timeout} секунд"}], exc.stdout or "", exc.stderr or "", root, self.checksum())
+        except subprocess.TimeoutExpired:
+            return CashflowResult("failed", [], [{"deal_id": None, "severity": "error", "code": "CFGEN_TIMEOUT", "field": None, "message": f"Таймаут {self.timeout} секунд"}], "", "", root, self.checksum())
         events = self._read_csv(out_dir / "cashflow.csv")
         engine_issues = self._read_csv(out_dir / "errors.csv")
         issues.extend(engine_issues)
@@ -100,6 +121,8 @@ class CashflowEngineAdapter:
         expected_deals = {item.get("deal_id") for item in rows}
         if process.returncode != 0 or not events:
             status = "failed"
+            if process.returncode != 0:
+                issues.append({"severity": "error", "code": "CFGEN_FAILED", "message": process.stderr.strip()[-2000:] or f"cfgen завершился с кодом {process.returncode}"})
         elif calculated_deals != expected_deals or error_deals:
             status = "partial"
         else:

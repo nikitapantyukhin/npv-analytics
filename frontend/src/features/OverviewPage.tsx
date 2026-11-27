@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { Activity, ArrowRight, Briefcase, ChartSpline, Hash, Plus, Wallet } from 'lucide-react'
-import { api, formatCount, formatMoney } from '../lib/api'
+import { api, formatCount, formatDate, formatMoney } from '../lib/api'
+import { useValuations } from '../lib/calculations'
 import { Badge, Button, Card, CardHeader, EmptyState, ErrorState, KPI, LoadingState, PageHeader, StatusBadge } from '../components/ui'
 import { Chart } from '../components/charts/Chart'
-import { chartColors } from '../components/charts/chartTheme'
+import { chartColors, limeAreaSeries } from '../components/charts/chartTheme'
 import { cn } from '../lib/utils'
 
 type Capability = {code: string; name: string; status: string; reason?: string}
@@ -27,10 +28,13 @@ function StructureBar({label, value, color}: {label: string; value: number; colo
 export function OverviewPage() {
   const portfolios = useQuery({queryKey: ['portfolios'], queryFn: () => api<Portfolio[]>('/portfolios')})
   const capabilities = useQuery({queryKey: ['capabilities'], queryFn: () => api<{capabilities: Capability[]}>('/capabilities')})
+  const portfolio = portfolios.data?.[0]
+  const valuations = useValuations(portfolio?.id, !!portfolio)
   if (portfolios.isLoading) return <LoadingState />
   if (portfolios.error) return <ErrorState message={(portfolios.error as Error).message} />
-  const portfolio = portfolios.data?.[0]
   const result = portfolio?.last_run?.result || {}
+  const history = [...new Map(valuations.data?.slice().reverse().map(item => [item.valuation_date, item])).values()]
+  const base = history.at(-1)
   const total = portfolio?.version.deal_count || 0
   const creditShare = total ? Math.round((portfolio!.version.credit_count / total) * 100) : 0
   const depositShare = total ? 100 - creditShare : 0
@@ -44,7 +48,7 @@ export function OverviewPage() {
         actions={<Link to="/generator"><Button variant="primary" size="lg"><Plus size={17} strokeWidth={2.2} /> Создать портфель</Button></Link>}
       />
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-5">
-        <KPI accent icon={Wallet} label="NPV портфеля" value={result.npv ? formatMoney(String(result.npv)) : '—'} sub={result.npv ? `Методика: ${String(result.convention || 'версионируемая')}` : 'Нет полного расчёта CF + DF'} />
+        <KPI accent icon={Wallet} label="NPV портфеля" value={formatMoney(base?.npv)} sub={base ? formatDate(base.valuation_date) : 'Нет полного расчёта CF + DF'} />
         <KPI icon={Hash} label="Количество сделок" value={formatCount(total)} sub={portfolio ? `${formatCount(portfolio.version.credit_count)} кредитов · ${formatCount(portfolio.version.deposit_count)} депозитов` : 'Создайте первый портфель'} />
         <KPI icon={Briefcase} label="Текущий портфель" value={<span className="text-[19px] leading-tight">{portfolio?.name || '—'}</span>} sub={portfolio ? `ID ${portfolio.id.slice(0, 8)}` : 'Нет сохранённых версий'} />
         <KPI icon={Activity} label="Последний расчёт" value={portfolio?.last_run?.status || '—'} sub={portfolio?.last_run ? portfolio.last_run.type : 'Расчёты ещё не запускались'} />
@@ -52,11 +56,15 @@ export function OverviewPage() {
       <div className="grid grid-cols-1 xl:grid-cols-[1.75fr_1fr] gap-5 mb-5">
         <Card>
           <CardHeader title="Динамика NPV" side={<Badge tone="outline">Сохранённые расчёты</Badge>} />
-          <EmptyState
+          {valuations.error ? <ErrorState message={valuations.error.message} /> : history.length ? <Chart height={260} option={{
+            xAxis: {type: 'category', data: history.map(item => formatDate(item.valuation_date))},
+            tooltip: {trigger: 'axis', valueFormatter: value => formatMoney(Number(value))},
+            series: [limeAreaSeries('NPV', history.map(item => Number(item.npv)), {showSymbol: true})],
+          }} /> : <EmptyState
             icon={ChartSpline}
-            title="Недостаточно исторических расчётов"
-            text="Динамика появится только после нескольких реальных NPV на разные даты — синтетическая линия не подставляется"
-          />
+            title="Нет сохранённых оценок"
+            text="Рассчитайте портфель с кривой, чтобы увидеть его NPV"
+          />}
         </Card>
         <Card>
           <CardHeader title="Структура портфеля" side="По количеству сделок" />

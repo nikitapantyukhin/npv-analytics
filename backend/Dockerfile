@@ -1,5 +1,5 @@
 FROM rust:1.85-bookworm AS cfgen-builder
-ARG NOSNITCHES_SHA=81690108afbe00b890a7f92f1e13fb125c603078
+ARG NOSNITCHES_SHA=77ca4571e2b355b75919efa6259b9e559c9d1121
 RUN git clone https://github.com/delusssion/nosnitches-cashflow.git /src/nosnitches \
     && git -C /src/nosnitches checkout "$NOSNITCHES_SHA"
 WORKDIR /src/nosnitches/engine

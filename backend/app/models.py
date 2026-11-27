@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import JSON, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Date, DateTime, ForeignKey, Index, Integer, LargeBinary, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -108,7 +108,24 @@ class CalculationRun(Base):
     market_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("market_data_snapshots.id"), nullable=True)
     method_version: Mapped[str | None] = mapped_column(String(100), nullable=True)
     args_hash: Mapped[str] = mapped_column(String(64), index=True)
+    inputs: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class IndicatorDataset(Base):
+    __tablename__ = "indicator_datasets"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    kind: Mapped[str] = mapped_column(String(16), index=True)
+    source: Mapped[str] = mapped_column(String(200))
+    filename: Mapped[str] = mapped_column(String(255))
+    valuation_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    first_date: Mapped[date] = mapped_column(Date)
+    last_date: Mapped[date] = mapped_column(Date)
+    scenarios: Mapped[list[str]] = mapped_column(JSON)
+    row_count: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    content: Mapped[bytes] = mapped_column(LargeBinary, deferred=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

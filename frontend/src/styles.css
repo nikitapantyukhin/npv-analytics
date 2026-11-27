@@ -168,3 +168,6 @@ input[type='range'].lime-range:disabled {
   transform: translateY(-2px);
   border-color: rgba(255, 255, 255, 0.14);
 }
+html[data-compact-tables] table :is(td, th) {
+  padding-block: 0.35rem !important;
+}

@@ -9,15 +9,16 @@
 | Кредиты/депозиты/mixed, seed, exact weights | Работает | largest-remainder и hash tests |
 | 1/100/1000 сделок | Работает | pytest; лимит API 100 000 |
 | CSV import/export и общий валидатор | Работает | API tests и server validator |
-| Реестр, фильтры, пагинация, карточка | Работает | API tests + React UI |
+| Реестр, поиск, фильтры, пагинация, карточка | Работает | Реестр использует серверные параметры и открывает исходные потоки и NPV сделки |
 | Реальный cfgen | Работает при наличии бинарника | 53 upstream-теста + 13 golden прошли; Compose собирает pinned SHA; capability проверяет файл, partial не маскируется |
 | FLOAT | Работает при загруженном CBKEY1M | Без проверенного CSV расчёт блокируется `KEY_RATE_MISSING` |
 | Досрочки | Доступно по контракту, UI расширения | Поле `prepayment_schedule`; генератор по умолчанию не выдумывает события |
 | Субсидии | Ожидает подтверждения сценарных настроек | События движка поддержаны, массовая генерация полей не включена без методики |
-| QuantumTeam live | Зависит от внешнего URL | 40 upstream-тестов прошли; health и реальные endpoints; offline не выдаётся за live |
+| QuantumTeam live | Работает с доступным MOEX | Quantum входит в Compose. База и стресс импортируются из срочного CSV одного снимка |
 | Immutable curve snapshots | Работает | import/refresh, hash/SHA/source/date |
-| PV/NPV Decimal | Работает | signed formula, coverage и extrapolation tests |
-| Discount-curve scenario | Работает | CF reused, DF/PV recomputed, waterfall tests |
+| PV/NPV Decimal | Работает | Автоматический выбор рыночной кривой, годовое дисконтирование ACT/365 и детализация DF/PV по событиям |
+| Стресс MOEX | Работает | Сохранённые потоки переоцениваются под сценарием Quantum |
+| Стресс прогноза CBKEY1M | Работает с проверенным CSV | RQ запускает `cfgen` с выбранным сценарием; waterfall показывает отдельный вклад |
 | Contract-rate scenario | Ожидает фонового сценарного cfgen | API сообщает `FACTOR_REQUIRES_CFGEN`, фиктивный ΔNPV не создаёт |
-| Исторический анализ | Ожидает данные/методику | Нужны два снимка состава, кривых, CF и time effect; HTTP 409 structured blocker |
+| Историческое сравнение | Работает с двумя оценками | Сравнение сохранённых NPV, PV и баланса. Атрибуция по факторам требует методики и данных о сделках между датами |
 | LLM-чат | Запланировано | Вне спринта 03 |

@@ -4,13 +4,15 @@ import { useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { ArrowRight, ChartSpline, Check, CircleAlert, Download, FileUp, Play, Plug, RefreshCw, ShieldCheck, Timer } from 'lucide-react'
 import { api, formatDate } from '../lib/api'
-import { Badge, Button, Card, CardHeader, EmptyState, ErrorState, KPI, PageHeader, SectionHeader, StatusBadge, Tabs } from '../components/ui'
+import { runActive, type IndicatorDataset, type Run } from '../lib/calculations'
+import { Badge, Button, Card, CardHeader, EmptyState, ErrorState, Field, Input, KPI, PageHeader, SectionHeader, StatusBadge, Tabs } from '../components/ui'
 import { cn } from '../lib/utils'
 
 type Status = {checked_at: string; nosnitches: {status: string; available: boolean; sha: string; binary: string; checksum?: string}; quantum: {status: string; available: boolean; sha: string; base_url: string; error?: string}}
-type Run = {run_id: string; type: string; status: string; stage: string; created_at: string; error_summary?: string; result?: Record<string, unknown>}
 type Audit = {id: number; level: string; module: string; code: string; message: string; created_at: string}
 type Issue = {id: number; code: string; message: string; severity: string; source: string; created_at: string}
+type Check = 'deals' | 'cashflows' | 'curves' | 'full'
+type Diagnostic = {status: string; steps: {name: string; status: string; reason: string}[]}
 
 const entries = [{key: 'connections', label: 'Подключения'}, {key: 'sources', label: 'Источники данных'}, {key: 'runs', label: 'Запуски расчётов'}, {key: 'logs', label: 'Проверки и журнал'}]
 
@@ -20,10 +22,14 @@ export function IntegrationsPage() {
   const client = useQueryClient()
   const status = useQuery({queryKey: ['integration-status'], queryFn: () => api<Status>('/integrations/status'), retry: false})
   const smoke = useMutation({
-    mutationFn: () => api<Record<string, unknown>>('/integrations/smoke-test', {method: 'POST'}),
+    mutationFn: (check: Check) => api<Diagnostic>(`/integrations/smoke-test?check=${check}`, {method: 'POST'}),
     onSuccess: async data => {
-      await client.invalidateQueries({queryKey: ['integration-status']})
-      toast.success('Сквозная проверка выполнена', {description: String(data.status || 'Результат в журнале')})
+      await Promise.all([
+        client.invalidateQueries({queryKey: ['integration-status']}),
+        client.invalidateQueries({queryKey: ['audit-events']}),
+      ])
+      if (data.status === 'succeeded') toast.success('Проверка пройдена')
+      else toast.warning('Часть проверок заблокирована')
     },
     onError: error => toast.error('Проверка не удалась', {description: (error as Error).message}),
   })
@@ -33,20 +39,26 @@ export function IntegrationsPage() {
         crumb="ДАННЫЕ И ИНТЕГРАЦИИ"
         title="Данные и интеграции"
         description="Подключения, загрузка данных, запуски вычислений и диагностика"
-        actions={<Button variant="primary" size="lg" disabled={smoke.isPending} onClick={() => smoke.mutate()}><RefreshCw size={15} strokeWidth={2.2} /> {smoke.isPending ? 'Проверка…' : 'Проверить подключения'}</Button>}
+        actions={<Button variant="primary" size="lg" disabled={smoke.isPending} onClick={() => smoke.mutate('full')}><RefreshCw size={15} strokeWidth={2.2} /> {smoke.isPending ? 'Проверка…' : 'Проверить подключения'}</Button>}
       />
       <Tabs items={entries.map(item => ({label: item.label, to: `/integrations${item.key === 'connections' ? '' : `?tab=${item.key}`}`, active: item.key === tab}))} />
       {status.error && <div className="mb-5"><ErrorState message={(status.error as Error).message} /></div>}
-      {tab === 'connections' && <Connections status={status.data} />}
+      {smoke.data && <Card className="mb-5">
+        <CardHeader title="Результаты проверки" side={<StatusBadge status={smoke.data.status} />} />
+        <ul className="m-0 pl-5 space-y-2 text-xs">
+          {smoke.data.steps.map(step => <li key={step.name} className={step.status === 'passed' ? 'text-muted' : 'text-amber'}>{step.name} · {step.reason}</li>)}
+        </ul>
+      </Card>}
+      {tab === 'connections' && <Connections status={status.data} check={value => smoke.mutate(value)} pending={smoke.isPending} />}
       {tab === 'sources' && <Sources />}
-      {tab === 'runs' && <Runs smoke={() => smoke.mutate()} pending={smoke.isPending} />}
-      {tab === 'logs' && <Logs smoke={smoke.data} />}
+      {tab === 'runs' && <Runs smoke={() => smoke.mutate('full')} pending={smoke.isPending} generationOnly={params.get('type') === 'generation'} />}
+      {tab === 'logs' && <Logs smoke={smoke.data} check={value => smoke.mutate(value)} pending={smoke.isPending} />}
     </>
   )
 }
 
-function Connections({status}: {status?: Status}) {
-  const checked = Number(status?.nosnitches.available) + Number(status?.quantum.available)
+function Connections({status, check, pending}: {status?: Status; check: (value: Check) => void; pending: boolean}) {
+  const checked = Number(Boolean(status?.nosnitches.available)) + Number(Boolean(status?.quantum.available))
   return (
     <div className="flex flex-col gap-5">
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
@@ -56,8 +68,8 @@ function Connections({status}: {status?: Status}) {
         <KPI icon={CircleAlert} label="Ошибки" value={2 - checked} sub={checked === 2 ? 'Обе интеграции доступны' : 'См. карточки ниже'} />
       </div>
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-        <Service name="nosnitches-cashflow" description="Денежные потоки, графики платежей, диагностика" technology="Rust · cfgen" method="CLI / локальный бинарник" status={status?.nosnitches.status} sha={status?.nosnitches.sha} detail={status?.nosnitches.checksum ? `SHA-256 бинарника ${status.nosnitches.checksum}` : status?.nosnitches.binary} />
-        <Service name="QuantumTeam" description="Базовые и сценарные процентные кривые" technology="Python · FastAPI" method="HTTP / REST" status={status?.quantum.status} sha={status?.quantum.sha} detail={status?.quantum.error || status?.quantum.base_url} />
+        <Service name="nosnitches-cashflow" description="Денежные потоки, графики платежей, диагностика" technology="Rust · cfgen" method="CLI / локальный бинарник" status={status?.nosnitches.status} sha={status?.nosnitches.sha} detail={status?.nosnitches.checksum ? `SHA-256 бинарника ${status.nosnitches.checksum}` : status?.nosnitches.binary} check={() => check('cashflows')} pending={pending} />
+        <Service name="QuantumTeam" description="Базовые и сценарные процентные кривые" technology="Python · FastAPI" method="HTTP / REST" status={status?.quantum.status} sha={status?.quantum.sha} detail={status?.quantum.error || status?.quantum.base_url} check={() => check('curves')} pending={pending} />
       </div>
       <Card>
         <CardHeader title="Цепочка обработки данных" />
@@ -77,7 +89,7 @@ function Connections({status}: {status?: Status}) {
   )
 }
 
-function Service({name, description, technology, method, status, sha, detail}: {name: string; description: string; technology: string; method: string; status?: string; sha?: string; detail?: string}) {
+function Service({name, description, technology, method, status, sha, detail, check, pending}: {name: string; description: string; technology: string; method: string; status?: string; sha?: string; detail?: string; check: () => void; pending: boolean}) {
   const rows = [['Технология', technology], ['Способ подключения', method], ['Доступность', status || 'Не проверено'], ['Версия', sha?.slice(0, 12) || '—'], ['Диагностика', detail || '—']]
   return (
     <Card hover>
@@ -91,9 +103,13 @@ function Service({name, description, technology, method, status, sha, detail}: {
         </div>
       ))}
       <div className="flex justify-end gap-2.5 mt-4">
-        <Button variant="secondary" size="sm">Проверить</Button>
-        <Button variant="secondary" size="sm">Подробнее</Button>
+        <Button variant="secondary" size="sm" aria-label={`Проверить ${name}`} disabled={pending} onClick={check}>Проверить</Button>
       </div>
+      <details className="mt-3 text-xs text-muted">
+        <summary className="cursor-pointer text-lime">Подробнее о подключении {name}</summary>
+        <p className="break-all">{sha || 'Версия недоступна'}</p>
+        {detail && <p className="break-all">{detail}</p>}
+      </details>
     </Card>
   )
 }
@@ -101,48 +117,71 @@ function Service({name, description, technology, method, status, sha, detail}: {
 function Sources() {
   const client = useQueryClient()
   const [file, setFile] = useState<File>()
-  const [kind, setKind] = useState<'portfolio' | 'key-rates'>('portfolio')
+  const [kind, setKind] = useState('portfolio')
+  const [source, setSource] = useState('')
+  const [valuationDate, setValuationDate] = useState('')
   const upload = useMutation({
     mutationFn: async () => {
       if (!file) throw new Error('Выберите CSV-файл')
       const body = new FormData()
       body.append('file', file)
-      return api<Record<string, unknown>>(kind === 'portfolio' ? '/portfolios/import?name=Импортированный%20портфель' : '/data/key-rates/import', {method: 'POST', body})
+      if (source.trim() && kind !== 'portfolio') body.append('source', source.trim())
+      if (kind === 'forecast') body.append('valuation_date', valuationDate)
+      const path = kind === 'forecast' ? '/data/key-rate-forecasts' : kind === 'key-rates' ? '/data/key-rates/import' : '/portfolios/import'
+      return api<Record<string, unknown>>(path, {method: 'POST', body})
     },
     onSuccess: () => {
       client.invalidateQueries({queryKey: ['portfolios']})
       client.invalidateQueries({queryKey: ['runs']})
+      client.invalidateQueries({queryKey: ['indicator-history']})
+      client.invalidateQueries({queryKey: ['indicator-forecasts']})
       toast.success('Файл проверен и сохранён')
     },
     onError: error => toast.error('Импорт не удался', {description: (error as Error).message}),
   })
   const portfolios = useQuery({queryKey: ['portfolios'], queryFn: () => api<{id: string; name: string; version: {deal_count: number; generator_version: string}}[]>('/portfolios')})
   const curves = useQuery({queryKey: ['curves'], queryFn: () => api<{id: string; source: string; point_count: number}[]>('/curves')})
+  const history = useQuery({queryKey: ['indicator-history'], queryFn: () => api<IndicatorDataset[]>('/data/key-rates')})
+  const forecasts = useQuery({queryKey: ['indicator-forecasts'], queryFn: () => api<IndicatorDataset[]>('/data/key-rate-forecasts')})
+  const rateDatasets = [...(history.data ?? []), ...(forecasts.data ?? [])]
   return (
     <div className="flex flex-col gap-5">
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
         <Card>
           <CardHeader title="Импорт данных" />
-          <div className="rounded-panel border border-dashed border-border-strong hover:border-lime/60 transition-colors min-h-[230px] flex flex-col items-center justify-center gap-2.5 p-5 text-center">
+          <div onDragOver={event => event.preventDefault()} onDrop={event => {
+            event.preventDefault()
+            if (!upload.isPending && event.dataTransfer.files[0]) {
+              upload.reset()
+              setFile(event.dataTransfer.files[0])
+            }
+          }} className="rounded-panel border border-dashed border-border-strong hover:border-lime/60 transition-colors min-h-[230px] flex flex-col items-center justify-center gap-2.5 p-5 text-center">
             <FileUp size={38} strokeWidth={1.4} className="text-lime" />
             <strong className="text-[13px]">{file?.name || 'Перетащите CSV-файл сюда'}</strong>
-            <p className="text-[11px] text-faint m-0">Сделки по 48/49-польному контракту или CBKEY1M</p>
+            <p className="text-[11px] text-faint m-0">{kind === 'forecast' ? 'indicator,date,rate,scenario · ставки в долях' : kind === 'key-rates' ? 'indicator,date,rate · ставки в долях' : 'Сделки по 48/49-польному контракту'}</p>
             <div className="w-[220px]">
-              <select value={kind} onChange={event => setKind(event.target.value as 'portfolio' | 'key-rates')} className="w-full h-9 rounded-xl bg-field border border-border px-3 text-xs text-foreground outline-none focus:border-lime cursor-pointer [&>option]:bg-card2">
+              <select aria-label="Тип набора данных" value={kind} onChange={event => setKind(event.target.value)} className="w-full h-9 rounded-xl bg-field border border-border px-3 text-xs text-foreground outline-none focus:border-lime cursor-pointer [&>option]:bg-card2">
                 <option value="portfolio">Сделки</option>
-                <option value="key-rates">Ключевая ставка</option>
+                <option value="key-rates">История CBKEY1M</option>
+                <option value="forecast">Прогноз CBKEY1M</option>
               </select>
             </div>
+            {kind !== 'portfolio' && <Field label="Источник ставок">
+              <Input aria-label="Источник ставок" value={source} onChange={event => setSource(event.target.value)} maxLength={200} />
+            </Field>}
+            {kind === 'forecast' && <Field label="Дата оценки прогноза">
+              <Input type="date" aria-label="Дата оценки прогноза" value={valuationDate} onChange={event => setValuationDate(event.target.value)} />
+            </Field>}
             <div className="flex gap-2.5 mt-1.5">
               <label className="inline-flex items-center gap-2 h-10 px-4 rounded-xl bg-[#242424] border border-border-strong text-[13px] font-semibold cursor-pointer hover:border-lime/40 hover:text-lime transition-all">
                 Выбрать файл
-                <input type="file" accept=".csv,text/csv" hidden onChange={event => setFile(event.target.files?.[0])} />
+                <input type="file" aria-label="Выбрать CSV" accept=".csv,text/csv" hidden onChange={event => {upload.reset(); setFile(event.target.files?.[0])}} />
               </label>
-              <Button variant="primary" disabled={!file || upload.isPending} onClick={() => upload.mutate()}>{upload.isPending ? 'Проверка…' : 'Проверить и импортировать'}</Button>
+              <Button variant="primary" disabled={!file || upload.isPending || (kind === 'forecast' && (!source.trim() || !valuationDate))} onClick={() => upload.mutate()}>{upload.isPending ? 'Проверка…' : 'Проверить и импортировать'}</Button>
             </div>
           </div>
           {upload.error && <p className="text-[11px] text-red mt-3 mb-0">{(upload.error as Error).message}</p>}
-          {upload.data && <div className="flex items-center gap-2 text-[11px] text-lime mt-3"><Check size={14} strokeWidth={2.5} /> Файл проверен и сохранён: {JSON.stringify(upload.data)}</div>}
+          {upload.data && <div className="flex items-center gap-2 text-[11px] text-lime mt-3"><Check size={14} strokeWidth={2.5} /> Файл проверен и сохранён</div>}
         </Card>
         <Card>
           <CardHeader title="Проверка загружаемых файлов" />
@@ -182,7 +221,16 @@ function Sources() {
                 <td className="border-b border-border px-3 py-3"><StatusBadge status="Доступно" /></td>
               </tr>
             ))}
-            {!portfolios.data?.length && !curves.data?.length && (
+            {rateDatasets.map(item => (
+              <tr key={item.id}>
+                <td className="border-b border-border px-3 py-3 text-[12.5px]">{item.valuation_date ? 'Прогноз CBKEY1M' : 'История CBKEY1M'} · {item.filename}</td>
+                <td className="border-b border-border px-3 py-3 text-[12px] text-muted">{item.source}</td>
+                <td className="border-b border-border px-3 py-3 text-[12px] tnum text-muted" title={item.sha256}>{item.id.slice(0, 8)}</td>
+                <td className="border-b border-border px-3 py-3 text-[12.5px] tnum">{item.rows}</td>
+                <td className="border-b border-border px-3 py-3 text-[12px]">{item.scenarios.join(', ') || `${item.first_date} · ${item.last_date}`}</td>
+              </tr>
+            ))}
+            {!portfolios.data?.length && !curves.data?.length && !rateDatasets.length && (
               <tr><td colSpan={5} className="px-3 py-6 text-center text-[12px] text-faint">Наборы данных ещё не загружены</td></tr>
             )}
           </tbody>
@@ -192,9 +240,12 @@ function Sources() {
   )
 }
 
-function Runs({smoke, pending}: {smoke: () => void; pending: boolean}) {
-  const runs = useQuery({queryKey: ['runs'], queryFn: () => api<Run[]>('/runs')})
-  const items = runs.data || []
+function Runs({smoke, pending, generationOnly}: {smoke: () => void; pending: boolean; generationOnly: boolean}) {
+  const runs = useQuery({
+    queryKey: ['runs'], queryFn: () => api<Run[]>('/runs'),
+    refetchInterval: query => query.state.data?.some(runActive) ? 1000 : false,
+  })
+  const items = (runs.data || []).filter(item => !generationOnly || item.type === 'generation')
   const queued = items.filter(item => ['queued', 'running'].includes(item.status)).length
   const succeeded = items.filter(item => item.status === 'succeeded').length
   const failed = items.filter(item => item.status === 'failed').length
@@ -219,12 +270,12 @@ function Runs({smoke, pending}: {smoke: () => void; pending: boolean}) {
         <p className="text-[10.5px] text-faint mt-3 mb-0">Проценты не показываются: внешние источники не дают достоверного progress.</p>
       </Card>
       <Card>
-        <CardHeader title="История вычислений" side={`${items.length} запусков`} />
+        <CardHeader title={generationOnly ? 'История генераций' : 'История вычислений'} side={`${items.length} запусков`} />
         {items.length ? (
           <div className="overflow-auto">
             <table className="w-full border-collapse text-left whitespace-nowrap">
               <thead>
-                <tr>{['Время', 'ID', 'Тип', 'Этап', 'Статус', 'Диагностика'].map(head => <th key={head} className="text-[10.5px] font-bold uppercase tracking-[0.08em] text-faint border-b border-border px-3 py-3">{head}</th>)}</tr>
+                <tr>{['Время', 'ID', 'Тип', 'Этап', 'Статус', 'Диагностика', 'Входы и файлы'].map(head => <th key={head} className="text-[10.5px] font-bold uppercase tracking-[0.08em] text-faint border-b border-border px-3 py-3">{head}</th>)}</tr>
               </thead>
               <tbody>
                 {items.map(item => (
@@ -235,6 +286,24 @@ function Runs({smoke, pending}: {smoke: () => void; pending: boolean}) {
                     <td className="border-b border-border px-3 py-3 text-[12px] text-muted">{item.stage}</td>
                     <td className="border-b border-border px-3 py-3"><StatusBadge status={item.status} /></td>
                     <td className="border-b border-border px-3 py-3 text-[12px] text-muted max-w-[280px] truncate">{item.error_summary || String(item.result?.valuation_reason || item.result?.cashflow_status || '—')}</td>
+                    <td className="border-b border-border px-3 py-3 text-[12px]">
+                      <div className="flex flex-wrap gap-x-2 gap-y-1">
+                        {item.market_snapshot_id && <span title={item.market_snapshot_id}>Снимок {item.market_snapshot_id.slice(0, 8)}</span>}
+                        {item.inputs?.history_id && <span title={item.inputs.history_sha256 ?? undefined}>История {item.inputs.history_id.slice(0, 8)}</span>}
+                        {item.inputs?.forecast_id && <span title={item.inputs.forecast_sha256 ?? undefined}>Прогноз {item.inputs.forecast_id.slice(0, 8)}</span>}
+                        {item.inputs?.indicator_scenario && <span>CBKEY1M {item.inputs.indicator_scenario}</span>}
+                        {item.inputs?.indicator_mode === 'H3' && <span>CBKEY1M по правилу H3</span>}
+                        {item.inputs?.discount_scenario && <span>MOEX {item.inputs.discount_scenario}</span>}
+                        {item.method_version && <span>{item.method_version}</span>}
+                      </div>
+                      {Array.isArray(item.result?.artifacts) && (
+                        <div className="flex flex-wrap gap-2 mt-1">
+                          {(item.result.artifacts as {id: string; filename: string; sha256: string}[]).map(artifact => (
+                            <a key={artifact.id} title={artifact.sha256} className="text-lime hover:underline" href={`/api/artifacts/${artifact.id}/download`}>{artifact.filename}</a>
+                          ))}
+                        </div>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -248,7 +317,7 @@ function Runs({smoke, pending}: {smoke: () => void; pending: boolean}) {
   )
 }
 
-function Logs({smoke}: {smoke?: Record<string, unknown>}) {
+function Logs({smoke, check, pending}: {smoke?: Diagnostic; check: (value: Check) => void; pending: boolean}) {
   const events = useQuery({queryKey: ['audit-events'], queryFn: () => api<Audit[]>('/audit-events')})
   const issues = useQuery({queryKey: ['validation-issues'], queryFn: () => api<Issue[]>('/validation-issues')})
   const [level, setLevel] = useState<'all' | 'info' | 'warning' | 'error'>('all')
@@ -280,12 +349,12 @@ function Logs({smoke}: {smoke?: Record<string, unknown>}) {
       <Card>
         <CardHeader title="Проверки и диагностика" side={smoke ? <StatusBadge status={String(smoke.status)} /> : 'Статус: не запущено'} />
         <div className="grid grid-cols-3 gap-4 max-lg:grid-cols-1">
-          {[{icon: ShieldCheck, title: 'Формат сделок', text: 'Общий серверный валидатор CSV'}, {icon: ChartSpline, title: 'Кривые ставок', text: 'Проверка API и точек'}, {icon: Play, title: 'Сквозной тест', text: 'Потоки → DF → NPV'}].map(item => (
+          {([{check: 'deals', icon: ShieldCheck, title: 'Формат сделок', text: 'Общий серверный валидатор CSV'}, {check: 'curves', icon: ChartSpline, title: 'Кривые ставок', text: 'Проверка API и точек'}, {check: 'full', icon: Play, title: 'Сквозной тест', text: 'Потоки → DF → NPV'}] as const).map(item => (
             <div key={item.title} className="rounded-panel bg-card2 border border-border p-4 flex flex-col gap-2.5">
               <item.icon size={24} strokeWidth={1.6} className="text-lime" />
               <strong className="text-[12.5px]">{item.title}</strong>
               <p className="text-[10.5px] text-faint m-0">{item.text}</p>
-              <Button variant="secondary" size="sm" className="self-start mt-1">Проверить</Button>
+              <Button variant="secondary" size="sm" aria-label={`Проверить: ${item.title}`} disabled={pending} onClick={() => check(item.check)} className="self-start mt-1">Проверить</Button>
             </div>
           ))}
         </div>

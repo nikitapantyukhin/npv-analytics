@@ -1,5 +1,22 @@
 # Подтверждённые интеграционные контракты
 
+## Единый запуск
+
+Корневой Compose собирает `cfgen` из ревизии `77ca4571e2b355b75919efa6259b9e559c9d1121` и QuantumTeam из `3f0bbfee881014f2101a5beaca65d95a32156817`. QuantumTeam работает со своей PostgreSQL-базой. Оба компонента подключены по их существующим интерфейсам.
+
+| Данные | Интерфейс | Назначение |
+|---|---|---|
+| База и стресс-кривые MOEX | `GET /api/v1/exports/curves/{id}/moex.csv` | `trade_date,scenario,tenor_years,rate`, ставка в долях. Срочное дисконтирование. |
+| История CBKEY1M | `POST /api/data/key-rates/import`, `GET /api/data/key-rates` | `indicator,date,rate`, ставка в долях. Исторические фиксации и правило H3. |
+| Прогноз CBKEY1M | `POST /api/data/key-rate-forecasts`, `GET /api/data/key-rate-forecasts` | Загрузка `file`, `source` и `valuation_date` как multipart. Колонки `indicator,date,rate,scenario`, сценарий можно опустить для базы. |
+| `cfgen` | `run --deals deals.csv --rates key_rate.csv --report-date YYYY-MM-DD --curves curves.csv --scenario base` | Для файла с прогнозом без колонки `scenario` флаг `--scenario` опускается. Результаты `cashflow.csv` и `errors.csv` сохраняются по ID запуска. |
+
+`POST /api/curves/refresh` импортирует последний готовый снимок. `POST /api/curves/calculate` принимает необязательный `trade_date` и ставит создание снимка в очередь. `GET /api/curves/{id}?scenario=parallel_up` возвращает точки сценария выбранного снимка. Маршрут QuantumTeam `calculator-demo.csv` остаётся учебным экспортом для проверки формата.
+
+`POST /api/portfolios/{id}/calculate` принимает `snapshot_id`, `history_id` и `forecast_id`. При отсутствии явно указанной истории для FLOAT выбирается последняя версия со ставкой на дату оценки или раньше. `POST /api/analysis/market-scenario` принимает `base_run_id` и один или оба поля `discount_scenario`, `indicator_scenario`. Оба фоновых расчёта отслеживаются через `GET /api/runs/{id}`.
+
+## Аудит исходной интеграции
+
 Дата аудита: 21.11.2026. Чужие репозитории клонировались во временный каталог только для чтения и не изменялись.
 
 ## nosnitches-cashflow

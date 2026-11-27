@@ -7,6 +7,8 @@ from decimal import Decimal, getcontext
 
 getcontext().prec = 34
 
+EFFECTIVE_ACT365 = "NPV-ANNUAL-EFFECTIVE-ACT365-v1"
+
 
 @dataclass(frozen=True)
 class DiscountPoint:
@@ -52,25 +54,47 @@ def continuous_discount_factor(rate_decimal: Decimal, tenor: Decimal) -> Decimal
     return (-rate_decimal * tenor).exp()
 
 
-def value_events(events: list[dict], valuation_date: date, points: list[DiscountPoint]) -> tuple[list[ValuedEvent], Decimal]:
+def value_events(
+    events: list[dict],
+    valuation_date: date,
+    points: list[DiscountPoint],
+    *,
+    method: str | None = None,
+) -> tuple[list[ValuedEvent], Decimal]:
     valued: list[ValuedEvent] = []
     total_pv = Decimal(0)
+    discount_by_date: dict[date, tuple[Decimal, Decimal, Decimal]] = {}
     for event in events:
         amount = Decimal(str(event["amount"]))
         if amount == 0:
             continue
         payment_date = event["payment_date"] if isinstance(event["payment_date"], date) else date.fromisoformat(str(event["payment_date"]))
-        tenor = act365(valuation_date, payment_date)
-        rate = interpolate_zero_rate(points, tenor)
-        factor = continuous_discount_factor(rate, tenor)
+        if payment_date not in discount_by_date:
+            try:
+                tenor = act365(valuation_date, payment_date)
+                rate = interpolate_zero_rate(points, tenor)
+                if method == EFFECTIVE_ACT365 and rate <= -1:
+                    raise ValueError("Для годового дисконтирования ставка должна быть больше -100%")
+            except ValueError as exc:
+                raise ValueError(f"Сделка {event['deal_id']}, платёж {payment_date}: {exc}") from exc
+            factor = (1 + rate) ** (-tenor) if method == EFFECTIVE_ACT365 else continuous_discount_factor(rate, tenor)
+            discount_by_date[payment_date] = (tenor, rate, factor)
+        tenor, rate, factor = discount_by_date[payment_date]
         pv = amount * factor
         valued.append(ValuedEvent(str(event["deal_id"]), payment_date, amount, tenor, rate, factor, pv))
         total_pv += pv
     return valued, total_pv
 
 
-def calculate_npv(events: list[dict], balances: dict[str, Decimal], valuation_date: date, points: list[DiscountPoint]) -> dict:
-    valued, total_pv = value_events(events, valuation_date, points)
+def calculate_npv(
+    events: list[dict],
+    balances: dict[str, Decimal],
+    valuation_date: date,
+    points: list[DiscountPoint],
+    *,
+    method: str | None = None,
+) -> dict:
+    valued, total_pv = value_events(events, valuation_date, points, method=method)
     total_balance = sum(balances.values(), Decimal(0))
     by_deal_pv: dict[str, Decimal] = {}
     for event in valued:

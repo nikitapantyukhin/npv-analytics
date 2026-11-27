@@ -1,12 +1,15 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, CalendarClock, ChartSpline, CircleAlert, Info, Percent, TrendingUp, Wallet } from 'lucide-react'
 import { api, formatDate, formatMoney, formatPercentFromDecimal } from '../lib/api'
+import { useValuations } from '../lib/calculations'
 import { Badge, Button, Card, CardHeader, EmptyState, ErrorState, KPI, LoadingState, PageHeader, Tabs } from '../components/ui'
 import { Chart } from '../components/charts/Chart'
+import { DiscountDetail, useDiscountBreakdown } from '../components/DiscountDetail'
 import { chartColors, limeAreaSeries, roundedBarSeries } from '../components/charts/chartTheme'
 
-type Deal = {id: string; deal_id: string; portfolio_id: string; kind: string; discriminator: string; rate_type: string; principal: string; interest_rate: string; deal_date: string; maturity_date: string; raw_fields: Record<string, string>; validation_status: string}
+type Deal = {id: string; deal_id: string; portfolio_id: string; kind: string; discriminator: string; rate_type: string; principal: string; interest_rate: string; deal_date: string; maturity_date: string; raw_fields: Record<string, string>; validation_status: string; valuation?: {npv: string; pv: string}}
 type Cashflow = {event_order: number; payment_date: string; payment_type: string; stream: string; amount: string; principal_before?: string; principal_after?: string; rate?: string}
 
 export function DealPage() {
@@ -18,6 +21,7 @@ export function DealPage() {
   if (deal.isLoading) return <LoadingState />
   if (deal.error) return <ErrorState message={(deal.error as Error).message} />
   const item = deal.data!
+  const discountLink = `/curves?${new URLSearchParams({tab: 'discount', portfolio: item.portfolio_id, deal: item.id})}`
   const tabs = [{key: 'general', label: 'Общие сведения'}, {key: 'payments', label: 'График платежей'}, {key: 'npv', label: 'NPV и дисконтирование'}, {key: 'raw', label: 'Исходные данные'}, {key: 'diagnostics', label: 'Диагностика'}]
   const paymentFlows = flows.data?.items.filter(flow => Number(flow.amount) !== 0) || []
   const chartFlows = paymentFlows.slice(0, 24)
@@ -36,7 +40,7 @@ export function DealPage() {
         actions={
           <>
             <Link to={`/portfolios/${portfolioId}`}><Button variant="secondary"><ArrowLeft size={15} /> К портфелю</Button></Link>
-            <Link to={`/analysis?deal=${item.id}`}><Button variant="primary" size="lg"><TrendingUp size={16} strokeWidth={2.2} /> Факторный анализ</Button></Link>
+            <Link to={discountLink}><Button variant="primary" size="lg"><TrendingUp size={16} strokeWidth={2.2} /> Дисконтирование сделки</Button></Link>
           </>
         }
       />
@@ -50,7 +54,7 @@ export function DealPage() {
         <KPI icon={Wallet} label="Текущий остаток" value={formatMoney(Math.abs(Number(item.principal)))} sub={item.kind === 'deposit' ? 'Знак в модели отрицательный' : 'Актив банка'} />
         <KPI icon={Percent} label="Ставка" value={formatPercentFromDecimal(item.interest_rate)} sub={item.rate_type === 'FLOAT' ? 'Маржа к CBKEY1M' : 'Фиксированная'} />
         <KPI icon={CalendarClock} label="Дата погашения" value={formatDate(item.maturity_date)} sub={`С даты ${formatDate(item.deal_date)}`} />
-        <KPI accent icon={TrendingUp} label="NPV сделки" value="—" sub="Откройте NPV после полного расчёта" />
+        <KPI accent icon={TrendingUp} label="NPV сделки" value={formatMoney(item.valuation?.npv)} sub={item.valuation ? `PV ${formatMoney(item.valuation.pv)}` : 'Нужен полный расчёт портфеля'} />
       </div>
       <Tabs items={tabs.map(entry => ({label: entry.label, to: `/portfolios/${portfolioId}/deals/${dealId}?tab=${entry.key}`, active: tab === entry.key}))} />
       {tab === 'payments' && (
@@ -147,12 +151,7 @@ export function DealPage() {
           </Card>
         </div>
       )}
-      {tab === 'npv' && (
-        <Card>
-          <CardHeader title="NPV и дисконтирование" />
-          <EmptyState icon={TrendingUp} title="Детализация NPV появится после полного расчёта" text="Нужны сохранённые CF этой сделки и проверенный снимок кривой с покрытием всех сроков" />
-        </Card>
-      )}
+      {tab === 'npv' && <DealValuation key={item.id} deal={item} discountLink={discountLink} />}
       {tab === 'raw' && (
         <Card>
           <CardHeader title="Исходные поля контракта nosnitches" side={`${Object.keys(item.raw_fields).length} полей`} />
@@ -173,18 +172,45 @@ export function DealPage() {
           </div>
         </Card>
       )}
-      {tab === 'diagnostics' && (
-        <Card>
-          <CardHeader title="Диагностика сделки" />
-          <div className="rounded-panel bg-card2 border border-border p-4 flex gap-3">
-            <CircleAlert size={18} className="text-amber shrink-0 mt-0.5" strokeWidth={1.8} />
-            <div>
-              <b className="text-[13px]">Серверная валидация: {item.validation_status}</b>
-              <p className="text-[11.5px] leading-relaxed text-muted mt-1.5 mb-0">Ошибки cfgen сохраняются без изменения полей deal_id, severity, code, field и message.</p>
-            </div>
-          </div>
-        </Card>
-      )}
+      {tab === 'diagnostics' && <DealDiagnostics deal={item} runId={flows.data?.run_id} />}
     </>
   )
+}
+
+function DealValuation({deal, discountLink}: {deal: Deal; discountLink: string}) {
+  const valuations = useValuations(deal.portfolio_id)
+  const [page, setPage] = useState(1)
+  const latest = valuations.data?.[0]
+  const report = useDiscountBreakdown(latest?.run_id, page, undefined, 'base', deal.id)
+  if (valuations.error || report.error) return <ErrorState message={(valuations.error || report.error)!.message} />
+  if (valuations.isLoading || report.isLoading) return <LoadingState />
+  if (!report.data) return <Card>
+    <EmptyState icon={TrendingUp} title="Нужен полный расчёт NPV" text="Рассчитайте портфель с дисконтной кривой"
+      action={<Link to={`/portfolios/${deal.portfolio_id}`} className="text-lime">Открыть портфель</Link>} />
+  </Card>
+  return <div className="flex flex-col gap-5">
+    <Card>
+      <CardHeader title="NPV и дисконтирование" side={<Link to={discountLink} className="text-lime">Сравнить кривые</Link>} />
+      <p className="text-sm text-muted">PV {formatMoney(report.data.pv_before)} · NPV {formatMoney(report.data.npv_before)}</p>
+    </Card>
+    <DiscountDetail data={report.data} page={page} onPage={setPage} />
+  </div>
+}
+
+function DealDiagnostics({deal, runId}: {deal: Deal; runId?: string}) {
+  const issues = useQuery({
+    queryKey: ['deal-issues', deal.id, runId],
+    queryFn: () => api<{id: number; code: string; message: string; field?: string; severity: string}[]>(
+      `/validation-issues?${new URLSearchParams({run_id: runId!, deal_id: deal.deal_id})}`,
+    ),
+    enabled: !!runId,
+  })
+  return <Card>
+    <CardHeader title="Диагностика сделки" side={deal.validation_status} />
+    {issues.error && <ErrorState message={issues.error.message} />}
+    {issues.data?.length ? <ul className="pl-5 space-y-3 text-sm">{issues.data.map(issue => (
+      <li key={issue.id} className="text-muted">{issue.severity} · {issue.code}{issue.field && ` · ${issue.field}`} · {issue.message}</li>
+    ))}</ul> : !issues.isLoading && <EmptyState compact icon={CircleAlert} title={runId ? 'Замечаний по сделке нет' : 'Денежные потоки ещё не рассчитаны'}
+      text={runId ? `Проверен запуск ${runId.slice(0, 8)}` : 'Запустите расчёт портфеля'} />}
+  </Card>
 }

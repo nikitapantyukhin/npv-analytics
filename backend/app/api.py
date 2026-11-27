@@ -4,44 +4,45 @@ import csv
 import hashlib
 import io
 import json
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from pathlib import Path
 
-from fastapi import APIRouter, Depends, FastAPI, File, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, FastAPI, File, Form, Query, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.calculations import (
+    create_calculation_run, create_market_scenario, create_quantum_run, refresh_quantum, run_discount_scenario,
+)
 from app.core.config import get_settings
 from app.core.errors import DomainError, domain_error_handler
 from app.db import Base, engine, get_db
+from app.diagnostics import DiagnosticCheck, run_integration_checks
 from app.domain.generator import NOSNITCHES_HEADERS, validate_deal_rows
 from app.integrations.cashflow import CashflowEngineAdapter
 from app.integrations.curves import QuantumCurvesAdapter
+from app.market_data import (
+    MAX_INDICATOR_CSV_BYTES, dataset_payload, discount_points, import_indicator_dataset, snapshot_scenarios,
+)
 from app.models import (
     AuditEvent,
     CalculationRun,
     CashflowEvent,
-    CurvePoint,
     Deal,
+    IndicatorDataset,
     MarketDataSnapshot,
     Portfolio,
     PortfolioVersion,
     StoredArtifact,
     ValidationIssue,
 )
-from app.schemas import CalculateRequest, CurveImportRequest, GeneratorRequest, ScenarioRequest
-from app.services import (
-    create_calculation_run,
-    create_generation_run,
-    import_curve,
-    latest_version,
-    refresh_quantum,
-    run_discount_scenario,
-)
+from app.readouts import discount_breakdown, historical_comparison, list_valuations
+from app.schemas import CalculateRequest, CurveImportRequest, GeneratorRequest, HistoricalCompareRequest, MarketScenarioRequest, QuantumCalculationRequest, ScenarioRequest
+from app.services import create_generation_run, import_curve, latest_version
 
 
 router = APIRouter(prefix="/api")
@@ -54,6 +55,10 @@ def run_payload(run: CalculationRun) -> dict:
         "status": run.status,
         "stage": run.stage,
         "portfolio_version_id": run.portfolio_version_id,
+        "market_snapshot_id": run.market_snapshot_id,
+        "method_version": run.method_version,
+        "engine_sha": run.engine_sha,
+        "inputs": run.inputs,
         "valuation_date": run.valuation_date,
         "created_at": run.created_at,
         "started_at": run.started_at,
@@ -70,18 +75,22 @@ def health(db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/capabilities")
-def capabilities() -> dict:
+def capabilities(db: Session = Depends(get_db)) -> dict:
     settings = get_settings()
     cashflow = CashflowEngineAdapter()
     quantum = QuantumCurvesAdapter().healthcheck()
+    valuation_dates = db.scalar(
+        select(func.count(func.distinct(CalculationRun.valuation_date)))
+        .where(CalculationRun.run_type == "valuation", CalculationRun.status == "succeeded", CalculationRun.market_snapshot_id.is_not(None))
+    ) or 0
     return {
         "capabilities": [
             {"code": "generator", "name": "Генератор сделок", "status": "Работает", "reason": "Детерминированный генератор и серверная валидация доступны"},
             {"code": "cashflows", "name": "Расчёт денежных потоков", "status": "Работает" if cashflow.available() else "Ожидает интеграции", "reason": None if cashflow.available() else f"Бинарник cfgen не найден по пути {settings.cfgen_bin}"},
             {"code": "curves", "name": "Кривые QuantumTeam", "status": "Работает" if quantum.ok else "Ожидает интеграции", "reason": None if quantum.ok else f"HTTP API {settings.quantum_base_url} недоступен: {quantum.error}"},
-            {"code": "valuation", "name": "PV / NPV", "status": "Работает", "reason": "Версионируемая учебная continuous-zero/ACT365 конвенция; требует проверенной кривой и полных CF"},
+            {"code": "valuation", "name": "PV / NPV", "status": "Работает", "reason": "Годовое эффективное дисконтирование ACT/365 для срочных кривых Quantum, требуется полное покрытие потоков"},
             {"code": "scenario_discount", "name": "Сценарный сдвиг дисконтной кривой", "status": "Работает", "reason": "CF переиспользуются, DF и PV пересчитываются"},
-            {"code": "historical", "name": "Исторический факторный анализ", "status": "Ожидает интеграции", "reason": "Нужны два полных снимка состава портфеля, кривых и CF"},
+            {"code": "historical", "name": "Сравнение NPV на две даты", "status": "Работает" if valuation_dates >= 2 else "Ожидает данных", "reason": "Сравнивает сохранённые NPV, PV и остатки портфелей"},
             {"code": "llm_chat", "name": "LLM-чат", "status": "Запланировано", "reason": "Не входит в третий спринт"},
         ],
         "revisions": {"nosnitches": settings.nosnitches_sha, "quantum": settings.quantum_sha},
@@ -113,7 +122,13 @@ async def import_portfolio(
         issues.append({"severity": "error", "code": "MISSING_HEADERS", "field": None, "message": f"Отсутствуют колонки: {', '.join(missing_headers)}"})
     if not rows or any(item["severity"] == "error" for item in issues):
         raise DomainError("IMPORT_VALIDATION_FAILED", "CSV не прошёл серверную валидацию", details={"issues": issues})
-    report_date = date.fromisoformat(rows[0]["report_dttm"])
+    try:
+        report_date = date.fromisoformat(rows[0]["report_dttm"])
+        for number, row in enumerate(rows, start=2):
+            if row["report_dttm"] != report_date.isoformat():
+                raise ValueError(f"Строка {number}: report_dttm должен совпадать с общей датой оценки {report_date}")
+    except (TypeError, ValueError) as exc:
+        raise DomainError("INVALID_REPORT_DATE", f"Проверьте колонку report_dttm: {exc}") from exc
     kinds = {"credit" if Decimal(row["current_principal_amt"]) > 0 else "deposit" for row in rows}
     portfolio_type = next(iter(kinds)) if len(kinds) == 1 else "mixed"
     portfolio = Portfolio(name=name, portfolio_type=portfolio_type)
@@ -160,6 +175,7 @@ def list_deals(
     kind: str | None = Query(default=None, pattern="^(credit|deposit)$"),
     rate_type: str | None = Query(default=None, pattern="^(FIXED|FLOAT)$"),
     discriminator: str | None = Query(default=None, pattern="^(ANN|RGM|SIMPLE)$"),
+    validation_status: str | None = Query(default=None, pattern="^(valid|warning|error)$"),
     sort: str = Query(default="business_deal_id", pattern="^(business_deal_id|principal|maturity_date|interest_rate)$"),
     direction: str = Query(default="asc", pattern="^(asc|desc)$"),
     page: int = Query(default=1, ge=1),
@@ -169,16 +185,21 @@ def list_deals(
     version = latest_version(db, portfolio_id)
     statement = select(Deal).where(Deal.portfolio_version_id == version.id)
     if search:
-        statement = statement.where(or_(Deal.business_deal_id.ilike(f"%{search[:100]}%"), Deal.kind.ilike(f"%{search[:100]}%")))
+        pattern = f"%{search[:100]}%"
+        statement = statement.where(or_(
+            Deal.business_deal_id.ilike(pattern), Deal.kind.ilike(pattern), Deal.raw_fields["product"].as_string().ilike(pattern),
+        ))
     if kind:
         statement = statement.where(Deal.kind == kind)
     if rate_type:
         statement = statement.where(Deal.rate_type == rate_type)
     if discriminator:
         statement = statement.where(Deal.discriminator == discriminator)
+    if validation_status:
+        statement = statement.where(Deal.validation_status == validation_status)
     count = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
     column = getattr(Deal, sort)
-    statement = statement.order_by(column.desc() if direction == "desc" else column.asc()).offset((page - 1) * page_size).limit(page_size)
+    statement = statement.order_by(column.desc() if direction == "desc" else column.asc(), Deal.id).offset((page - 1) * page_size).limit(page_size)
     deals = db.scalars(statement).all()
     return {"items": [{"id": deal.id, "deal_id": deal.business_deal_id, "kind": deal.kind, "discriminator": deal.discriminator, "rate_type": deal.rate_type, "principal": str(deal.principal), "interest_rate": str(deal.interest_rate), "deal_date": deal.deal_date, "maturity_date": deal.maturity_date, "validation_status": deal.validation_status} for deal in deals], "page": page, "page_size": page_size, "total": count, "pages": (count + page_size - 1) // page_size}
 
@@ -196,7 +217,7 @@ def export_portfolio(portfolio_id: str, db: Session = Depends(get_db)) -> Stream
 
 @router.post("/portfolios/{portfolio_id}/calculate", status_code=status.HTTP_202_ACCEPTED)
 def calculate_portfolio(portfolio_id: str, payload: CalculateRequest, db: Session = Depends(get_db)) -> dict:
-    return run_payload(create_calculation_run(db, portfolio_id, payload.snapshot_id, payload.idempotency_key))
+    return run_payload(create_calculation_run(db, portfolio_id, payload))
 
 
 def _find_deal(db: Session, deal_id: str) -> Deal:
@@ -210,7 +231,13 @@ def _find_deal(db: Session, deal_id: str) -> Deal:
 def get_deal(deal_id: str, db: Session = Depends(get_db)) -> dict:
     deal = _find_deal(db, deal_id)
     version = db.get(PortfolioVersion, deal.portfolio_version_id)
-    return {"id": deal.id, "deal_id": deal.business_deal_id, "portfolio_id": version.portfolio_id, "version_id": version.id, "kind": deal.kind, "discriminator": deal.discriminator, "rate_type": deal.rate_type, "principal": str(deal.principal), "interest_rate": str(deal.interest_rate), "deal_date": deal.deal_date, "maturity_date": deal.maturity_date, "raw_fields": deal.raw_fields, "validation_status": deal.validation_status}
+    run = db.scalar(
+        select(CalculationRun)
+        .where(CalculationRun.portfolio_version_id == version.id, CalculationRun.run_type == "valuation", CalculationRun.status == "succeeded")
+        .order_by(CalculationRun.created_at.desc()).limit(1)
+    )
+    valuation = (run.result or {}).get("by_deal", {}).get(deal.business_deal_id) if run else None
+    return {"id": deal.id, "deal_id": deal.business_deal_id, "portfolio_id": version.portfolio_id, "version_id": version.id, "kind": deal.kind, "discriminator": deal.discriminator, "rate_type": deal.rate_type, "principal": str(deal.principal), "interest_rate": str(deal.interest_rate), "deal_date": deal.deal_date, "maturity_date": deal.maturity_date, "raw_fields": deal.raw_fields, "validation_status": deal.validation_status, "valuation": valuation}
 
 
 @router.get("/deals/{deal_id}/cashflows")
@@ -245,30 +272,65 @@ def list_runs(limit: int = Query(default=100, ge=1, le=500), db: Session = Depen
     return [run_payload(run) for run in db.scalars(select(CalculationRun).order_by(CalculationRun.created_at.desc()).limit(limit)).all()]
 
 
+@router.get("/runs/{run_id}/discount")
+def get_run_discount(
+    run_id: str,
+    alternative_id: str | None = None,
+    scenario: str = "base",
+    deal_id: str | None = None,
+    page: int = Query(default=1, ge=1),
+    db: Session = Depends(get_db),
+) -> dict:
+    return discount_breakdown(db, run_id, alternative_id, scenario, deal_id, page)
+
+
+def snapshot_payload(snapshot: MarketDataSnapshot) -> dict:
+    return {
+        "id": snapshot.id, "source": snapshot.source, "external_id": snapshot.external_id,
+        "trade_date": snapshot.trade_date, "retrieved_at": snapshot.retrieved_at,
+        "curve_type": snapshot.curve_type, "scenario": snapshot.scenario,
+        "scenarios": snapshot_scenarios(snapshot), "convention": snapshot.convention,
+        "data_hash": snapshot.data_hash, "source_sha": snapshot.source_sha, "point_count": len(snapshot.points),
+    }
+
+
 @router.get("/curves")
 def list_curves(db: Session = Depends(get_db)) -> list[dict]:
-    snapshots = db.scalars(select(MarketDataSnapshot).order_by(MarketDataSnapshot.trade_date.desc(), MarketDataSnapshot.retrieved_at.desc())).all()
-    return [{"id": item.id, "source": item.source, "external_id": item.external_id, "trade_date": item.trade_date, "retrieved_at": item.retrieved_at, "curve_type": item.curve_type, "scenario": item.scenario, "convention": item.convention, "data_hash": item.data_hash, "source_sha": item.source_sha, "point_count": len(item.points)} for item in snapshots]
+    snapshots = db.scalars(select(MarketDataSnapshot).order_by(MarketDataSnapshot.trade_date.desc(), MarketDataSnapshot.retrieved_at.desc()))
+    return [snapshot_payload(snapshot) for snapshot in snapshots]
 
 
 @router.get("/curves/{snapshot_id}")
-def get_curve(snapshot_id: str, db: Session = Depends(get_db)) -> dict:
+def get_curve(snapshot_id: str, scenario: str = "base", db: Session = Depends(get_db)) -> dict:
     snapshot = db.get(MarketDataSnapshot, snapshot_id)
     if not snapshot:
         raise DomainError("SNAPSHOT_NOT_FOUND", "Снимок кривой не найден", status_code=404)
-    return {"id": snapshot.id, "source": snapshot.source, "external_id": snapshot.external_id, "trade_date": snapshot.trade_date, "retrieved_at": snapshot.retrieved_at, "convention": snapshot.convention, "data_hash": snapshot.data_hash, "source_sha": snapshot.source_sha, "points": [{"bucket_code": item.bucket_code, "tenor_years": str(item.tenor_years), "rate_decimal": str(item.rate_decimal), "rate_percent": str(Decimal(item.rate_decimal) * 100), "shift_bp": str(item.shift_bp) if item.shift_bp is not None else None} for item in sorted(snapshot.points, key=lambda point: point.tenor_years)]}
+    base_by_tenor = {point.tenor_years: point for point in snapshot.points}
+    points = []
+    for point in sorted(discount_points(snapshot, scenario), key=lambda item: item.tenor_years):
+        base = base_by_tenor[point.tenor_years]
+        shift = base.shift_bp if scenario == snapshot.scenario else (point.rate_decimal - base.rate_decimal) * 10_000
+        points.append({
+            "bucket_code": base.bucket_code, "tenor_years": str(point.tenor_years),
+            "rate_decimal": str(point.rate_decimal), "rate_percent": str(point.rate_decimal * 100),
+            "shift_bp": str(shift) if shift is not None else None,
+        })
+    return {**snapshot_payload(snapshot), "scenario": scenario, "points": points}
 
 
 @router.post("/curves/import", status_code=status.HTTP_201_CREATED)
 def import_curve_endpoint(payload: CurveImportRequest, db: Session = Depends(get_db)) -> dict:
-    snapshot = import_curve(db, payload)
-    return {"id": snapshot.id, "source": snapshot.source, "trade_date": snapshot.trade_date, "data_hash": snapshot.data_hash, "point_count": len(snapshot.points)}
+    return snapshot_payload(import_curve(db, payload))
 
 
 @router.post("/curves/refresh", status_code=status.HTTP_201_CREATED)
 def refresh_curve(db: Session = Depends(get_db)) -> dict:
-    snapshot = refresh_quantum(db)
-    return {"id": snapshot.id, "source": snapshot.source, "trade_date": snapshot.trade_date, "data_hash": snapshot.data_hash, "point_count": len(snapshot.points)}
+    return snapshot_payload(refresh_quantum(db))
+
+
+@router.post("/curves/calculate", status_code=status.HTTP_202_ACCEPTED)
+def calculate_curve(payload: QuantumCalculationRequest | None = None, db: Session = Depends(get_db)) -> dict:
+    return run_payload(create_quantum_run(db, payload.trade_date if payload else None))
 
 
 @router.get("/curves/scenarios/available")
@@ -282,9 +344,21 @@ def scenario_analysis(payload: ScenarioRequest, db: Session = Depends(get_db)) -
     return run_payload(run_discount_scenario(db, payload))
 
 
-@router.post("/analysis/historical")
-def historical_analysis() -> Response:
+@router.post("/analysis/market-scenario", status_code=status.HTTP_202_ACCEPTED)
+def market_scenario(payload: MarketScenarioRequest, db: Session = Depends(get_db)) -> dict:
+    return run_payload(create_market_scenario(db, payload))
+
+
+@router.post("/analysis/historical", response_model=None)
+def historical_analysis(payload: HistoricalCompareRequest | None = None, db: Session = Depends(get_db)) -> dict | Response:
+    if payload and payload.first_run_id and payload.last_run_id:
+        return historical_comparison(db, payload.first_run_id, payload.last_run_id)
     return Response(status_code=409, media_type="application/json", content=json.dumps({"code": "HISTORICAL_SNAPSHOTS_MISSING", "message": "Для исторического анализа нужны два полных снимка портфеля, кривой и денежных потоков, а также подтверждённая методика эффекта времени.", "details": {"required": ["portfolio_snapshot_start", "portfolio_snapshot_end", "curve_start", "curve_end", "cashflows_start", "cashflows_end", "time_effect_method"]}, "retryable": False}, ensure_ascii=False))
+
+
+@router.get("/analysis/valuations")
+def valuations(portfolio_id: str | None = None, db: Session = Depends(get_db)) -> list[dict]:
+    return list_valuations(db, portfolio_id)
 
 
 @router.get("/analysis/{analysis_id}")
@@ -296,26 +370,48 @@ def get_analysis(analysis_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/data/key-rates/import", status_code=status.HTTP_201_CREATED)
-async def import_key_rates(file: UploadFile = File(...)) -> dict:
-    content = await file.read(10 * 1024 * 1024 + 1)
-    if len(content) > 10 * 1024 * 1024:
-        raise DomainError("FILE_TOO_LARGE", "Максимальный размер CSV — 10 МБ", status_code=413)
-    try:
-        text = content.decode("utf-8-sig")
-        rows = list(csv.DictReader(io.StringIO(text)))
-        if not rows or not {"indicator", "date", "rate"}.issubset(rows[0]):
-            raise ValueError("Нужны колонки indicator,date,rate")
-        for row in rows:
-            if row["indicator"] != "CBKEY1M":
-                raise ValueError(f"Неподдерживаемый индикатор {row['indicator']}")
-            date.fromisoformat(row["date"])
-            Decimal(row["rate"])
-    except (UnicodeDecodeError, csv.Error, ValueError, ArithmeticError) as exc:
-        raise DomainError("KEY_RATE_VALIDATION_FAILED", "CSV ключевой ставки не прошёл проверку", details={"error": str(exc)}) from exc
-    target = get_settings().artifacts_dir.resolve() / "market" / "key_rate.csv"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(content)
-    return {"filename": file.filename, "rows": len(rows), "sha256": hashlib.sha256(content).hexdigest(), "indicator": "CBKEY1M", "status": "validated"}
+def import_key_rates(
+    file: UploadFile = File(...),
+    source: str = Form(default="Загруженный CSV истории", min_length=1, max_length=200),
+    db: Session = Depends(get_db),
+) -> dict:
+    dataset = import_indicator_dataset(
+        db, file.file.read(MAX_INDICATOR_CSV_BYTES + 1), kind="history",
+        filename=file.filename or "key_rate.csv", source=source,
+    )
+    db.commit()
+    return dataset_payload(dataset)
+
+
+@router.post("/data/key-rate-forecasts", status_code=status.HTTP_201_CREATED)
+def import_key_rate_forecast(
+    file: UploadFile = File(...),
+    source: str = Form(min_length=1, max_length=200),
+    valuation_date: date = Form(...),
+    db: Session = Depends(get_db),
+) -> dict:
+    dataset = import_indicator_dataset(
+        db, file.file.read(MAX_INDICATOR_CSV_BYTES + 1), kind="forecast",
+        filename=file.filename or "curves.csv", source=source, valuation_date=valuation_date,
+    )
+    db.commit()
+    return dataset_payload(dataset)
+
+
+def _list_indicator_datasets(db: Session, kind: str) -> list[dict]:
+    return [dataset_payload(dataset) for dataset in db.scalars(
+        select(IndicatorDataset).where(IndicatorDataset.kind == kind).order_by(IndicatorDataset.created_at.desc())
+    )]
+
+
+@router.get("/data/key-rates")
+def list_key_rates(db: Session = Depends(get_db)) -> list[dict]:
+    return _list_indicator_datasets(db, "history")
+
+
+@router.get("/data/key-rate-forecasts")
+def list_key_rate_forecasts(db: Session = Depends(get_db)) -> list[dict]:
+    return _list_indicator_datasets(db, "forecast")
 
 
 @router.get("/integrations/status")
@@ -327,15 +423,23 @@ def integration_status() -> dict:
 
 
 @router.post("/integrations/smoke-test")
-def smoke_test() -> dict:
-    settings = get_settings()
-    quantum = QuantumCurvesAdapter().healthcheck()
-    return {"status": "partial" if not (CashflowEngineAdapter().available() and quantum.ok) else "succeeded", "steps": [{"name": "cfgen binary", "status": "passed" if CashflowEngineAdapter().available() else "blocked", "reason": None if CashflowEngineAdapter().available() else f"Нет {settings.cfgen_bin}"}, {"name": "QuantumTeam health", "status": "passed" if quantum.ok else "blocked", "reason": quantum.error}, {"name": "NPV Analytics formula", "status": "passed", "reason": "Проверяется unit-тестами Decimal/ACT365/waterfall"}]}
+def smoke_test(check: DiagnosticCheck = "full", db: Session = Depends(get_db)) -> dict:
+    return run_integration_checks(db, check)
 
 
 @router.get("/validation-issues")
-def validation_issues(limit: int = Query(default=200, ge=1, le=1000), db: Session = Depends(get_db)) -> list[dict]:
-    issues = db.scalars(select(ValidationIssue).order_by(ValidationIssue.created_at.desc()).limit(limit)).all()
+def validation_issues(
+    limit: int = Query(default=200, ge=1, le=1000),
+    run_id: str | None = None,
+    deal_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    statement = select(ValidationIssue).order_by(ValidationIssue.created_at.desc()).limit(limit)
+    if run_id:
+        statement = statement.where(ValidationIssue.run_id == run_id)
+    if deal_id:
+        statement = statement.where(ValidationIssue.deal_id == deal_id)
+    issues = db.scalars(statement).all()
     return [{"id": item.id, "run_id": item.run_id, "deal_id": item.deal_id, "severity": item.severity, "code": item.code, "field": item.field, "message": item.message, "source": item.source, "created_at": item.created_at} for item in issues]
 
 
@@ -358,7 +462,7 @@ def download_artifact(artifact_id: str, db: Session = Depends(get_db)) -> FileRe
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     get_settings().artifacts_dir.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
     yield

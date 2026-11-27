@@ -52,7 +52,25 @@ class GeneratorRequest(BaseModel):
 
 class CalculateRequest(BaseModel):
     snapshot_id: str | None = None
+    auto_curve: bool = False
+    history_id: str | None = None
+    forecast_id: str | None = None
     idempotency_key: str | None = Field(default=None, max_length=120)
+
+
+class QuantumCalculationRequest(BaseModel):
+    trade_date: date | None = None
+
+
+class HistoricalCompareRequest(BaseModel):
+    first_run_id: str | None = None
+    last_run_id: str | None = None
+
+
+class MarketScenarioRequest(BaseModel):
+    base_run_id: str
+    discount_scenario: str | None = Field(default=None, min_length=1, max_length=80)
+    indicator_scenario: str | None = Field(default=None, min_length=1, max_length=80)
 
 
 class CurvePointIn(BaseModel):

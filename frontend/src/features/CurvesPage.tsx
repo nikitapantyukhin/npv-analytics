@@ -1,44 +1,126 @@
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { ChartSpline, Check, ChevronRight, Hash, Info, RefreshCw, TrendingDown, TrendingUp } from 'lucide-react'
 import { api, formatDate, formatMoney, formatPercentFromDecimal } from '../lib/api'
-import { Badge, Button, Card, CardHeader, EmptyState, ErrorState, Field, Input, KPI, LoadingState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../components/ui'
+import { runActive, useTrackedRun, useValuations, type Run } from '../lib/calculations'
+import { Badge, Button, Card, CardHeader, EmptyState, ErrorState, Field, Input, KPI, LoadingState, PageHeader, Select, StatusBadge, Tabs } from '../components/ui'
 import { Chart } from '../components/charts/Chart'
+import { DiscountDetail, useDiscountBreakdown } from '../components/DiscountDetail'
 import { chartColors, limeAreaSeries } from '../components/charts/chartTheme'
 
-type Snapshot = {id: string; source: string; external_id?: string; trade_date: string; retrieved_at: string; convention: string; data_hash: string; source_sha?: string; point_count: number}
+type Snapshot = {id: string; source: string; external_id?: string; trade_date: string; retrieved_at: string; convention: string; data_hash: string; source_sha?: string; point_count: number; scenario: string; scenarios: string[]; curve_type: string}
 type Curve = Snapshot & {points: {bucket_code: string; tenor_years: string; rate_decimal: string; rate_percent: string; shift_bp?: string}[]}
 
 const tabs = [{key: 'curves', label: 'Кривые'}, {key: 'scenarios', label: 'Сценарии'}, {key: 'discount', label: 'Дисконтирование и NPV'}, {key: 'history', label: 'История кривых'}]
 
 export function CurvesPage() {
-  const [params] = useSearchParams()
+  const [params, setParams] = useSearchParams()
+  const [tradeDate, setTradeDate] = useState('')
   const tab = params.get('tab') || 'curves'
   const snapshots = useQuery({queryKey: ['curves'], queryFn: () => api<Snapshot[]>('/curves')})
-  const selected = params.get('snapshot') || snapshots.data?.[0]?.id
-  const curve = useQuery({queryKey: ['curve', selected], queryFn: () => api<Curve>(`/curves/${selected}`), enabled: !!selected})
+  const snapshot = snapshots.data?.find(item => item.id === params.get('snapshot')) ?? snapshots.data?.[0]
+  const selected = snapshot?.id
+  const requestedScenario = params.get('scenario') || 'base'
+  const scenario = snapshot?.scenarios.includes(requestedScenario) ? requestedScenario : 'base'
+  const curve = useQuery({
+    queryKey: ['curve', selected, scenario],
+    queryFn: () => api<Curve>(`/curves/${selected}?scenario=${encodeURIComponent(scenario)}`),
+    enabled: !!selected && tab === 'curves',
+  })
   const queryClient = useQueryClient()
-  const refresh = useMutation({mutationFn: () => api<Snapshot>('/curves/refresh', {method: 'POST'}), onSuccess: () => queryClient.invalidateQueries({queryKey: ['curves']})})
+  const refresh = useMutation({
+    mutationFn: () => api<Snapshot>('/curves/refresh', {method: 'POST'}),
+    onSuccess: snapshot => {
+      void queryClient.invalidateQueries({queryKey: ['curves']})
+      setParams(previous => {
+        const next = new URLSearchParams(previous)
+        next.set('snapshot', snapshot.id)
+        next.delete('scenario')
+        return next
+      })
+    },
+  })
+  const calculate = useMutation({
+    mutationFn: () => api<Run>('/curves/calculate', {
+      method: 'POST', body: JSON.stringify({trade_date: tradeDate || null}),
+    }),
+  })
+  const tracked = useTrackedRun(calculate.data)
+  const calculatedId = tracked.run?.status === 'succeeded' ? tracked.run.result?.snapshot_id : undefined
+  const displayedSnapshot = useRef<string>(undefined)
+  useEffect(() => {
+    if (typeof calculatedId !== 'string' || displayedSnapshot.current === calculatedId) return
+    displayedSnapshot.current = calculatedId
+    void queryClient.invalidateQueries({queryKey: ['curves']})
+    setParams(previous => {
+      const next = new URLSearchParams(previous)
+      next.set('snapshot', calculatedId)
+      next.delete('scenario')
+      return next
+    })
+  }, [calculatedId, queryClient, setParams])
+
+  function selectCurve(snapshotId: string, code = 'base') {
+    setParams(previous => {
+      const next = new URLSearchParams(previous)
+      next.set('snapshot', snapshotId)
+      next.set('scenario', code)
+      return next
+    })
+  }
+
+  const pending = calculate.isPending || (runActive(tracked.run) && !tracked.error)
+  const error = calculate.error?.message || tracked.error?.message || tracked.run?.error_summary
+    || refresh.error?.message || snapshots.error?.message || curve.error?.message
   if (snapshots.isLoading) return <LoadingState />
   return (
     <>
       <PageHeader
         crumb="КРИВЫЕ СТАВОК"
         title="Кривые ставок"
-        description={tab === 'scenarios' ? 'Управление базовыми и пользовательскими стресс-сценариями' : tab === 'discount' ? 'Влияние базовой и сценарной дисконтных кривых на PV и NPV' : tab === 'history' ? 'Сравнение рыночных кривых за разные даты' : 'Базовые и сценарные процентные кривые, сравнение по срокам'}
-        actions={<Button variant="primary" size="lg" disabled={refresh.isPending} onClick={() => refresh.mutate()}><RefreshCw size={15} strokeWidth={2.2} /> {tab === 'scenarios' ? 'Создать сценарий' : tab === 'history' ? 'Загрузить снимок' : 'Получить последнюю кривую'}</Button>}
+        description={tab === 'scenarios' ? 'Стресс-сценарии, рассчитанные QuantumTeam для выбранного снимка' : tab === 'discount' ? 'Влияние базовой и сценарной дисконтных кривых на PV и NPV' : tab === 'history' ? 'Сравнение рыночных кривых за разные даты' : 'Базовые и сценарные процентные кривые, сравнение по срокам'}
+        actions={(
+          <div className="flex flex-wrap gap-2.5">
+            <Button variant="secondary" disabled={refresh.isPending || pending} onClick={() => {calculate.reset(); refresh.mutate()}}>Импортировать готовый</Button>
+            <Input type="date" aria-label="Торговая дата MOEX" value={tradeDate} onChange={event => setTradeDate(event.target.value)} className="w-auto" />
+            <Button variant="primary" disabled={pending || refresh.isPending} onClick={() => {refresh.reset(); calculate.mutate()}}>
+              <RefreshCw size={15} strokeWidth={2.2} /> {pending ? 'Построение…' : 'Построить кривую MOEX'}
+            </Button>
+          </div>
+        )}
       />
-      <Tabs items={tabs.map(item => ({label: item.label, to: `/curves${item.key === 'curves' ? '' : `?tab=${item.key}`}`, active: item.key === tab}))} />
-      {refresh.error && <div className="mb-5"><ErrorState message={(refresh.error as Error).message} /></div>}
-      {tab === 'curves' && <Curves snapshots={snapshots.data || []} curve={curve.data} />}
-      {tab === 'scenarios' && <Scenarios />}
+      <Tabs items={tabs.map(item => {
+        const search = new URLSearchParams(params)
+        if (item.key === 'curves') search.delete('tab')
+        else search.set('tab', item.key)
+        return {label: item.label, to: `/curves?${search}`, active: item.key === tab}
+      })} />
+      {error && <div className="mb-5"><ErrorState message={error} /></div>}
+      {tracked.run && <div className="mb-4"><StatusBadge status={tracked.run.status} /></div>}
+      {snapshot && (tab === 'curves' || tab === 'scenarios') && (
+        <div className="grid gap-3 sm:grid-cols-2 mb-5 max-w-[640px]">
+          <Field label="Сохранённый снимок">
+            <Select aria-label="Сохранённый снимок" value={selected} onChange={event => selectCurve(event.target.value)}>
+              {snapshots.data?.map(item => <option key={item.id} value={item.id}>{item.trade_date} · {item.source} · {item.id.slice(0, 8)}</option>)}
+            </Select>
+          </Field>
+          {tab === 'curves' && <Field label="Сценарий снимка">
+            <Select aria-label="Сценарий снимка" value={scenario} onChange={event => selectCurve(snapshot.id, event.target.value)}>
+              {snapshot.scenarios.map(code => <option key={code} value={code}>{code === 'base' ? 'Базовая кривая' : code}</option>)}
+            </Select>
+          </Field>}
+        </div>
+      )}
+      {tab === 'curves' && (curve.isLoading ? <LoadingState /> : <Curves curve={curve.data} />)}
+      {tab === 'scenarios' && <Scenarios snapshot={snapshot} />}
       {tab === 'discount' && <Discount snapshots={snapshots.data || []} />}
       {tab === 'history' && <History snapshots={snapshots.data || []} />}
     </>
   )
 }
 
-function Curves({snapshots, curve}: {snapshots: Snapshot[]; curve?: Curve}) {
+function Curves({curve}: {curve?: Curve}) {
   if (!curve) {
     return (
       <Card>
@@ -64,7 +146,7 @@ function Curves({snapshots, curve}: {snapshots: Snapshot[]; curve?: Curve}) {
         <span className="inline-flex items-center gap-2 rounded-full bg-card border border-border px-3.5 py-2 text-[11.5px] text-muted">Источник <strong className="text-foreground">{curve.source}</strong></span>
         <span className="inline-flex items-center gap-2 rounded-full bg-card border border-border px-3.5 py-2 text-[11.5px] text-muted">Снимок <strong className="text-foreground">{formatDate(curve.trade_date)}</strong></span>
         <span className="inline-flex items-center gap-2 rounded-full bg-card border border-border px-3.5 py-2 text-[11.5px] text-muted">Точек <strong className="text-foreground">{curve.point_count}</strong></span>
-        <StatusBadge status={curve.source === 'verified_external' ? 'Доступно' : 'Не проверено'} />
+        <StatusBadge status={curve.source === 'quantum_cached' ? 'Сохранённый снимок' : 'Доступно'} />
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <KPI icon={TrendingUp} label="Краткая ставка" value={points[0] ? formatPercentFromDecimal(points[0].rate_decimal) : '—'} sub={points[0]?.bucket_code || 'Нет точки'} />
@@ -74,14 +156,14 @@ function Curves({snapshots, curve}: {snapshots: Snapshot[]; curve?: Curve}) {
       </div>
       <div className="grid grid-cols-1 xl:grid-cols-[1.75fr_1fr] gap-5">
         <Card>
-          <CardHeader title="Кривая по срокам" side={<span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-lime inline-block" /> Базовая</span>} />
+          <CardHeader title="Кривая по срокам" side={<span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-lime inline-block" /> {curve.scenario === 'base' ? 'Базовая' : curve.scenario}</span>} />
           <Chart
             height={300}
             option={{
               xAxis: {type: 'category', data: points.map(point => point.bucket_code)},
               yAxis: {type: 'value', axisLabel: {color: chartColors.axis, fontSize: 11, formatter: (value: number) => `${value}%`}, splitLine: {lineStyle: {color: chartColors.grid, type: 'dashed'}}},
               tooltip: {trigger: 'axis', valueFormatter: value => `${Number(value).toLocaleString('ru-RU', {maximumFractionDigits: 2})}%`},
-              series: [{...limeAreaSeries('Базовая кривая', points.map(point => Number(point.rate_decimal) * 100)), showSymbol: true}],
+              series: [{...limeAreaSeries(curve.scenario === 'base' ? 'Базовая кривая' : curve.scenario, points.map(point => Number(point.rate_decimal) * 100)), showSymbol: true}],
             }}
           />
         </Card>
@@ -95,7 +177,7 @@ function Curves({snapshots, curve}: {snapshots: Snapshot[]; curve?: Curve}) {
             <Info size={16} className="text-amber shrink-0 mt-0.5" strokeWidth={1.8} />
             <div>
               <b className="text-xs">Важное ограничение</b>
-              <p className="text-[11px] leading-relaxed text-muted mt-1 mb-0">Ставка QuantumTeam и прогноз CBKEY1M для FLOAT — разные сущности. Связь не предполагается автоматически.</p>
+              <p className="text-[11px] leading-relaxed text-muted mt-1 mb-0">Эта кривая задаёт дисконтирование платежей. Для FLOAT-прогноза загрузите отдельный CSV CBKEY1M.</p>
             </div>
           </div>
         </Card>
@@ -104,7 +186,7 @@ function Curves({snapshots, curve}: {snapshots: Snapshot[]; curve?: Curve}) {
         <CardHeader title="Точки кривой" side={<span className="font-mono text-[11px]">{curve.data_hash.slice(0, 12)}</span>} />
         <table className="w-full border-collapse text-left">
           <thead>
-            <tr>{['Бакет', 'Срок, лет', 'Ставка', 'Источник', 'Статус'].map(head => <th key={head} className="text-[10.5px] font-bold uppercase tracking-[0.08em] text-faint border-b border-border px-3 py-3">{head}</th>)}</tr>
+            <tr>{['Точка', 'Срок, лет', 'Ставка', 'Источник', 'Статус'].map(head => <th key={head} className="text-[10.5px] font-bold uppercase tracking-[0.08em] text-faint border-b border-border px-3 py-3">{head}</th>)}</tr>
           </thead>
           <tbody>
             {points.map(point => (
@@ -123,134 +205,155 @@ function Curves({snapshots, curve}: {snapshots: Snapshot[]; curve?: Curve}) {
   )
 }
 
-function Scenarios() {
-  const scenarios = useQuery({queryKey: ['curve-scenarios'], queryFn: () => api<{status: string; items: {id: number; code: string; name: string; scenario_type: string}[]; reason?: string}>('/curves/scenarios/available'), retry: false})
-  const verified = [{code: 'parallel_up', name: 'Parallel up'}, {code: 'parallel_down', name: 'Parallel down'}, {code: 'short_up', name: 'Short up'}, {code: 'short_down', name: 'Short down'}, {code: 'steepener', name: 'Steepener'}, {code: 'flattener', name: 'Flattener'}]
-  const items = scenarios.data?.items?.length ? scenarios.data.items : verified
+function Scenarios({snapshot}: {snapshot?: Snapshot}) {
+  const codes = snapshot?.scenarios.filter(code => code !== 'base') ?? []
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-      <Card>
-        <CardHeader title="Стандартные сценарии" side={<StatusBadge status={scenarios.data?.status === 'available' ? 'Доступно' : 'Недоступно'} />} />
-        <div className="flex flex-col gap-2.5">
-          {items.map((item, index) => (
-            <div key={item.code} className={`flex items-center gap-3.5 rounded-panel border p-3.5 transition-all duration-200 cursor-pointer ${index === 0 ? 'border-lime/50 bg-lime/6' : 'border-border bg-card2 hover:border-border-strong'}`}>
-              <span className={`grid place-items-center w-9 h-9 rounded-xl shrink-0 ${index === 0 ? 'bg-lime/15 text-lime' : 'bg-white/5 text-muted'}`}>
-                {item.code.includes('down') ? <TrendingDown size={18} strokeWidth={1.8} /> : <TrendingUp size={18} strokeWidth={1.8} />}
+    <Card>
+      <CardHeader title="Стресс-сценарии снимка" />
+      {snapshot && codes.length ? (
+        <div className="grid gap-2.5 sm:grid-cols-2">
+          {codes.map(code => (
+            <Link key={code} to={`/curves?snapshot=${snapshot.id}&scenario=${encodeURIComponent(code)}`}
+              className="flex items-center gap-3 rounded-panel border border-border bg-card2 p-3.5 hover:border-lime/50">
+              <span className="grid place-items-center w-9 h-9 rounded-xl bg-white/5 text-muted">
+                {code.includes('down') ? <TrendingDown size={18} /> : <TrendingUp size={18} />}
               </span>
-              <div className="flex-1 min-w-0">
-                <strong className="block text-[12.5px]">{item.name}</strong>
-                <small className="block text-[10.5px] text-faint mt-1">{scenarios.data?.items?.length ? `Реальный сценарий API · ${item.code}` : `Подтверждён исходным кодом SHA, сервис сейчас недоступен · ${item.code}`}</small>
-              </div>
-              <ChevronRight size={17} className="text-faint shrink-0" />
-            </div>
+              <strong className="flex-1 text-[12.5px]">{code}</strong>
+              <ChevronRight size={17} className="text-faint" />
+            </Link>
           ))}
         </div>
-      </Card>
-      <Card>
-        <CardHeader title="Пользовательский сценарий" side={<Badge tone="outline">Редактор</Badge>} />
-        <Field label="Название сценария" className="mb-4"><Input defaultValue="Повышение краткосрочных ставок" /></Field>
-        <Field label="Тип сдвига" className="mb-4"><Select><option>По контрольным срокам</option></Select></Field>
-        <SectionHeader title="Точки сдвига" />
-        <table className="w-full border-collapse text-left mb-4">
-          <thead>
-            <tr>{['Срок', 'Сдвиг, б.п.'].map(head => <th key={head} className="text-[10.5px] font-bold uppercase tracking-[0.08em] text-faint border-b border-border px-3 py-2.5">{head}</th>)}</tr>
-          </thead>
-          <tbody>
-            {[['3 месяца', '+150'], ['1 год', '+125'], ['3 года', '+75'], ['5 лет', '+50'], ['10 лет', '+25']].map(row => (
-              <tr key={row[0]} className="hover:bg-white/3 transition-colors">
-                <td className="border-b border-border px-3 py-2.5 text-[12.5px]">{row[0]}</td>
-                <td className="border-b border-border px-3 py-2.5 text-[12.5px] tnum text-lime font-semibold">{row[1]}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className="flex justify-end gap-2.5">
-          <Button variant="secondary">Проверить</Button>
-          <Button variant="primary" disabled={scenarios.data?.status !== 'available'} title="Сохранение доступно только при живом API QuantumTeam">Сохранить сценарий</Button>
-        </div>
-        <div className="rounded-panel bg-card2 border border-border p-3.5 mt-4">
-          <b className="text-xs">При сохранении</b>
-          <p className="text-[11px] leading-relaxed text-muted mt-1 mb-0">Базовый снимок не меняется. Создаётся отдельный сценарий через реальный POST /api/v1/scenarios.</p>
-        </div>
-      </Card>
-    </div>
+      ) : <EmptyState icon={ChartSpline} title="Стресс-сценариев пока нет" text="Постройте срочную кривую QuantumTeam или выберите снимок с рассчитанными сценариями" />}
+    </Card>
   )
 }
 
+
 function Discount({snapshots}: {snapshots: Snapshot[]}) {
-  const runs = useQuery({queryKey: ['runs'], queryFn: () => api<{run_id: string; type: string; result?: Record<string, unknown>}[]>('/runs')})
-  const complete = runs.data?.find(run => run.result?.npv)
+  const [params] = useSearchParams()
+  const portfolioId = params.get('portfolio') || undefined
+  const dealId = params.get('deal') || undefined
+  const valuations = useValuations(portfolioId)
+  const [runId, setRunId] = useState('')
+  const [curveId, setCurveId] = useState('')
+  const [scenarioCode, setScenarioCode] = useState('')
+  const [page, setPage] = useState(1)
+  const run = valuations.data?.find(item => item.run_id === runId) || valuations.data?.[0]
+  const choices = snapshots.filter(item => run && item.trade_date <= run.valuation_date)
+  const selected = choices.find(item => item.id === curveId) || choices.find(item => item.id === run?.snapshot_id)
+  const scenario = selected?.scenarios.includes(scenarioCode) ? scenarioCode : 'base'
+  const breakdown = useDiscountBreakdown(run?.run_id, page, selected?.id, scenario, dealId)
+  const data = breakdown.data
   return (
     <div className="flex flex-col gap-5">
       <Card>
-        <CardHeader title="Параметры дисконтирования" />
-        <div className="grid grid-cols-4 gap-4 max-lg:grid-cols-2 max-md:grid-cols-1">
-          <Field label="Объект"><Select><option>Последний рассчитанный портфель</option></Select></Field>
-          <Field label="Кривая до"><Select><option>{snapshots[0] ? `${snapshots[0].trade_date} · ${snapshots[0].source}` : 'Нет снимка'}</option></Select></Field>
-          <Field label="Кривая после"><Select><option>Parallel up · через сценарный анализ</option></Select></Field>
-          <Field label="Дата оценки"><div className="h-10 rounded-xl bg-card2 border border-border px-3.5 flex items-center text-[13px] text-muted">Из версии портфеля</div></Field>
+        <CardHeader title={dealId ? 'Дисконтирование сделки' : 'Параметры дисконтирования'} />
+        <div className="grid grid-cols-3 gap-4 max-md:grid-cols-1">
+          <Field label="Базовый расчёт">
+            <Select aria-label="Базовый расчёт для дисконтирования" value={run?.run_id || ''} onChange={event => {
+              setRunId(event.target.value)
+              setCurveId('')
+              setScenarioCode('')
+              setPage(1)
+            }}>
+              <option value="" disabled>Нет полного NPV</option>
+              {valuations.data?.map(item => <option key={item.run_id} value={item.run_id}>{item.portfolio_name} · {formatDate(item.valuation_date)} · {item.run_id.slice(0, 8)}</option>)}
+            </Select>
+          </Field>
+          <Field label="Кривая после">
+            <Select aria-label="Кривая после" value={selected?.id || ''} onChange={event => {
+              setCurveId(event.target.value)
+              setScenarioCode('')
+              setPage(1)
+            }}>
+              <option value="" disabled>Нет кривой</option>
+              {choices.map(item => <option key={item.id} value={item.id}>{formatDate(item.trade_date)} · {item.source}</option>)}
+            </Select>
+          </Field>
+          <Field label="Сценарий сравнения">
+            <Select aria-label="Сценарий сравнения" value={scenario} onChange={event => {setScenarioCode(event.target.value); setPage(1)}}>
+              {(selected?.scenarios || ['base']).map(code => <option key={code} value={code}>{code === 'base' ? 'Базовая кривая' : code}</option>)}
+            </Select>
+          </Field>
         </div>
+        {run && <p className="text-muted text-xs mt-3 mb-0">Дата оценки {formatDate(run.valuation_date)} · базовая методика {run.method_version}</p>}
       </Card>
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <KPI icon={Hash} label="NPV до" value={complete?.result?.npv ? formatMoney(String(complete.result.npv)) : '—'} sub={complete ? `Запуск ${complete.run_id.slice(0, 8)}` : 'Нет полного расчёта'} />
-        <KPI icon={Hash} label="NPV после" value="—" sub="Выполните сценарий" />
-        <KPI accent icon={TrendingUp} label="ΔNPV" value="—" sub="После применения кривой" />
-        <KPI icon={ChartSpline} label="Точек в кривой" value={snapshots[0]?.point_count ?? '—'} sub={snapshots[0]?.source || 'Нет снимка'} />
-      </div>
-      <Card>
-        <CardHeader title="Дисконт-факторы и приведённая стоимость" side="Только после расчёта" />
-        <EmptyState icon={TrendingUp} title="Событийная детализация не выбрана" text="Полный NPV вычисляется только при наличии CF и DF для каждого ненулевого события; пропуски не агрегируются" />
-        <div className="rounded-panel bg-card2 border border-border p-3.5 max-w-[640px] mx-auto">
-          <b className="text-xs">Текущая методика</b>
-          <p className="text-[11px] leading-relaxed text-muted mt-1 mb-0">ACT/365, continuous zero rate, линейная интерполяция zero rate без скрытой экстраполяции. Это явно маркированное допущение NPV Analytics, не «метод QuantumTeam».</p>
+      {valuations.error && <ErrorState message={valuations.error.message} onRetry={() => {void valuations.refetch()}} />}
+      {breakdown.error && <ErrorState message={breakdown.error.message} />}
+      {breakdown.isLoading && <LoadingState />}
+      {data && <>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <KPI icon={Hash} label="NPV до" value={formatMoney(data.npv_before)} sub={`PV ${formatMoney(data.pv_before)}`} />
+          <KPI icon={Hash} label="NPV после" value={formatMoney(data.npv_after)} sub={`PV ${formatMoney(data.pv_after)}`} />
+          <KPI accent icon={TrendingUp} label="ΔNPV и ΔPV" value={formatMoney(data.delta)} sub="Остатки портфеля зафиксированы" />
         </div>
-      </Card>
+        <DiscountDetail data={data} page={page} onPage={setPage} />
+      </>}
+      {!run && !valuations.isLoading && <Card>
+        <EmptyState icon={ChartSpline} title="Нужен полный расчёт NPV" text="Рассчитайте портфель с дисконтной кривой"
+          action={<Link className="text-lime" to={portfolioId ? `/portfolios/${portfolioId}` : '/portfolios'}>Открыть портфель</Link>} />
+      </Card>}
     </div>
   )
 }
 
 function History({snapshots}: {snapshots: Snapshot[]}) {
-  const ready = snapshots.length >= 2
+  const [firstId, selectFirst] = useState('')
+  const [lastId, selectLast] = useState('')
+  const comparable = snapshots.filter(item => item.curve_type === 'quantum_term')
+  const available = comparable.length >= 2 ? comparable : snapshots
+  const last = available.find(item => item.id === lastId) || available[0]
+  const first = available.find(item => item.id === firstId)
+    || available.find(item => last && item.trade_date < last.trade_date)
+    || available.find(item => item.id !== last?.id)
+  const firstCurve = useQuery({queryKey: ['curve', first?.id, 'base'], queryFn: () => api<Curve>(`/curves/${first?.id}`), enabled: !!first})
+  const lastCurve = useQuery({queryKey: ['curve', last?.id, 'base'], queryFn: () => api<Curve>(`/curves/${last?.id}`), enabled: !!last})
+  const error = firstCurve.error || lastCurve.error
+  const ratesByTenor = new Map(lastCurve.data?.points.map(point => [Number(point.tenor_years), Number(point.rate_decimal)]))
+  const diff = firstCurve.data?.points.flatMap(point => {
+    const tenor = Number(point.tenor_years)
+    const next = ratesByTenor.get(tenor)
+    return next === undefined ? [] : [{tenor, bp: (next - Number(point.rate_decimal)) * 10_000}]
+  }) || []
+  const ready = firstCurve.data && lastCurve.data
   return (
     <div className="flex flex-col gap-5">
       <Card>
         <CardHeader title="Историческое сравнение" />
         <div className="grid grid-cols-2 gap-4 max-md:grid-cols-1">
-          <Field label="Начальная дата"><Select><option>{snapshots[1] ? formatDate(snapshots[1].trade_date) : 'Нет снимка'}</option></Select></Field>
-          <Field label="Конечная дата"><Select><option>{snapshots[0] ? formatDate(snapshots[0].trade_date) : 'Нет снимка'}</option></Select></Field>
+          <Field label="Начальная дата"><Select aria-label="Начальный снимок кривой" value={first?.id || ''} onChange={event => selectFirst(event.target.value)}>
+            <option value="" disabled>Нет снимка</option>
+            {available.filter(item => item.id !== last?.id).map(item => <option key={item.id} value={item.id}>{formatDate(item.trade_date)} · {item.id.slice(0, 8)}</option>)}
+          </Select></Field>
+          <Field label="Конечная дата"><Select aria-label="Конечный снимок кривой" value={last?.id || ''} onChange={event => selectLast(event.target.value)}>
+            <option value="" disabled>Нет снимка</option>
+            {available.filter(item => item.id !== first?.id).map(item => <option key={item.id} value={item.id}>{formatDate(item.trade_date)} · {item.id.slice(0, 8)}</option>)}
+          </Select></Field>
         </div>
       </Card>
-      {!ready && (
-        <Card className="border-amber/25">
-          <div className="flex items-start gap-4">
-            <span className="grid place-items-center w-11 h-11 rounded-2xl bg-amber/12 text-amber shrink-0"><Info size={22} strokeWidth={1.8} /></span>
-            <div className="flex-1">
-              <strong className="block text-[14px]">Нужны два реально сохранённых снимка</strong>
-              <p className="text-muted text-xs leading-relaxed mt-1.5 mb-0">История строится только из immutable-снимков с источником, датой и hash. Отсутствующие прошлые кривые не генерируются.</p>
-            </div>
-            <Badge tone="amber">Ожидает данных</Badge>
-          </div>
-        </Card>
-      )}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-        <Card>
-          <CardHeader title="Кривые на две даты" />
-          {ready
-            ? <EmptyState icon={ChartSpline} title="Выберите сопоставимые точки" text="Снимки доступны; детальная загрузка выполняется при выборе" />
-            : <EmptyState icon={ChartSpline} title="История ставок пока недоступна" text="Добавьте исторические снимки через раздел «Источники данных»" />}
-        </Card>
-        <Card>
-          <CardHeader title="Изменения по срокам" />
-          {ready
-            ? (
-              <div className="flex items-center gap-3 py-4">
-                <Check size={18} className="text-lime" strokeWidth={2.2} />
-                <span className="text-[12.5px] text-muted">Снимки готовы к сравнению</span>
-              </div>
-            )
-            : <EmptyState title="Нет сопоставимых точек" text="Результаты сравнения появятся здесь" />}
-        </Card>
-      </div>
+      {error && <ErrorState message={error.message} />}
+      {(firstCurve.isLoading || lastCurve.isLoading) && <LoadingState />}
+      {ready ? (
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+          <Card>
+            <CardHeader title="Кривые на две даты" />
+            <Chart height={285} option={{
+              legend: {show: true}, xAxis: {type: 'value', name: 'Лет'}, yAxis: {type: 'value', name: '% годовых'},
+              series: [firstCurve.data!, lastCurve.data!].map(item => ({
+                type: 'line', name: first?.trade_date === last?.trade_date ? `${formatDate(item.trade_date)} · ${item.id.slice(0, 8)}` : formatDate(item.trade_date), showSymbol: false,
+                data: item.points.map(point => [Number(point.tenor_years), Number(point.rate_percent)]),
+              })),
+            }} />
+          </Card>
+          <Card>
+            <CardHeader title="Изменения по срокам" side="б.п." />
+            {diff.length ? <div className="max-h-[290px] overflow-auto"><table className="w-full text-left text-xs">
+              <thead><tr><th className="p-2">Срок, лет</th><th className="p-2">Изменение</th></tr></thead>
+              <tbody>{diff.map(item => <tr className="border-t border-border" key={item.tenor}><td className="p-2">{item.tenor}</td><td className="p-2">{item.bp.toFixed(2)}</td></tr>)}</tbody>
+            </table></div> : <EmptyState title="Нет общих сроков" text="Выберите снимки с сопоставимыми узлами" />}
+          </Card>
+        </div>
+      ) : !first && <Card><EmptyState icon={ChartSpline} title="Нужны два снимка" text="Укажите торговую дату и постройте ещё одну кривую MOEX" /></Card>}
     </div>
   )
 }

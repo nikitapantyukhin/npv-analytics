@@ -3,14 +3,19 @@ import * as echarts from 'echarts'
 import type { EChartsOption } from 'echarts'
 import { baseOption } from './chartTheme'
 
+function mergeAxes<Axis extends object>(base: Axis | Axis[] | undefined, option: Axis | Axis[] | undefined): Axis | Axis[] {
+  const defaults = Array.isArray(base) ? base[0] : base
+  return Array.isArray(option) ? option.map(axis => ({...defaults, ...axis})) : {...defaults, ...option} as Axis
+}
+
 function mergeOption(option: EChartsOption): EChartsOption {
   const base = baseOption()
   const series = (Array.isArray(option.series) ? option.series : [option.series]).filter(Boolean) as {type?: string}[]
   const cartesian = series.some(item => item.type === 'line' || item.type === 'bar' || item.type === 'scatter')
   const merged: EChartsOption = {...base, ...option}
   if (cartesian) {
-    merged.xAxis = {...(base.xAxis as object), ...(option.xAxis as object)} as EChartsOption['xAxis']
-    merged.yAxis = {...(base.yAxis as object), ...(option.yAxis as object)} as EChartsOption['yAxis']
+    merged.xAxis = mergeAxes(base.xAxis, option.xAxis)
+    merged.yAxis = mergeAxes(base.yAxis, option.yAxis)
   } else {
     delete merged.xAxis
     delete merged.yAxis

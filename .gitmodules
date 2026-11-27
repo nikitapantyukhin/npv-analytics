@@ -1,0 +1,6 @@
+[submodule "QuantumTeam"]
+	path = QuantumTeam
+	url = https://github.com/miniMlena/QuantumTeam
+[submodule "nosnitches-cashflow"]
+	path = nosnitches-cashflow
+	url = https://github.com/delusssion/nosnitches-cashflow

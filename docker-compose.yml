@@ -5,6 +5,37 @@ networks:
       config:
         - subnet: ${NPV_DOCKER_SUBNET:-172.30.17.0/24}
 services:
+  quantum-postgres:
+    image: postgres:16-alpine
+    command: ["postgres", "-c", "timezone=Europe/Moscow", "-c", "log_timezone=Europe/Moscow"]
+    environment:
+      POSTGRES_DB: quantum
+      POSTGRES_USER: quantum
+      POSTGRES_PASSWORD: ${QUANTUM_POSTGRES_PASSWORD:-quantum}
+    volumes:
+      - quantum-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quantum -d quantum"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  quantum:
+    build:
+      context: https://github.com/miniMlena/QuantumTeam.git#${QUANTUM_SHA:-3f0bbfee881014f2101a5beaca65d95a32156817}
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://quantum:${QUANTUM_POSTGRES_PASSWORD:-quantum}@quantum-postgres:5432/quantum
+      REDIS_HOST: redis
+      TZ: Europe/Moscow
+    depends_on:
+      quantum-postgres: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -36,17 +67,19 @@ services:
       context: .
       dockerfile: backend/Dockerfile
       args:
-        NOSNITCHES_SHA: 81690108afbe00b890a7f92f1e13fb125c603078
+        NOSNITCHES_SHA: ${NOSNITCHES_SHA:-77ca4571e2b355b75919efa6259b9e559c9d1121}
     env_file:
       - path: .env
         required: false
-    environment:
-      DATABASE_URL: postgresql+psycopg://npv:${POSTGRES_PASSWORD:-npv}@postgres:5432/npv
+    environment: &npv-environment
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-npv}:${POSTGRES_PASSWORD:-npv}@postgres:5432/${POSTGRES_DB:-npv}
       REDIS_URL: redis://redis:6379/0
       TASK_MODE: rq
       CFGEN_BIN: /opt/cfgen/cfgen
       ARTIFACTS_DIR: /app/artifacts
-      QUANTUM_BASE_URL: ${QUANTUM_BASE_URL:-http://host.docker.internal:8001}
+      QUANTUM_BASE_URL: ${QUANTUM_BASE_URL:-http://quantum:8000}
+      QUANTUM_SHA: ${QUANTUM_SHA:-3f0bbfee881014f2101a5beaca65d95a32156817}
+      NOSNITCHES_SHA: ${NOSNITCHES_SHA:-77ca4571e2b355b75919efa6259b9e559c9d1121}
     volumes:
       - npv-artifacts:/app/artifacts
     extra_hosts:
@@ -65,16 +98,11 @@ services:
 
   worker:
     image: npv-analytics-backend:latest
+    pull_policy: never
     env_file:
       - path: .env
         required: false
-    environment:
-      DATABASE_URL: postgresql+psycopg://npv:${POSTGRES_PASSWORD:-npv}@postgres:5432/npv
-      REDIS_URL: redis://redis:6379/0
-      TASK_MODE: rq
-      CFGEN_BIN: /opt/cfgen/cfgen
-      ARTIFACTS_DIR: /app/artifacts
-      QUANTUM_BASE_URL: ${QUANTUM_BASE_URL:-http://host.docker.internal:8001}
+    environment: *npv-environment
     volumes:
       - npv-artifacts:/app/artifacts
     depends_on:
@@ -95,5 +123,6 @@ services:
 
 volumes:
   npv-postgres:
+  quantum-postgres:
   npv-redis:
   npv-artifacts:

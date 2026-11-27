@@ -15,7 +15,7 @@ import { cn } from '../lib/utils'
 type Generated = {status: string; error_summary?: string; result?: {portfolio_id: string; credit_count: number; deposit_count: number}}
 
 const schema = z.object({
-  name: z.string().min(1, 'Укажите название'),
+  name: z.string().min(1, 'Укажите название').max(200, 'Максимум 200 символов'),
   portfolio_type: z.enum(['mixed', 'credit', 'deposit']),
   count: z.number({error: 'Укажите число'}).int().min(1, 'Минимум 1 сделка').max(100000, 'Максимум 100 000'),
   valuation_date: z.string().min(1, 'Укажите дату'),
@@ -23,15 +23,15 @@ const schema = z.object({
   credit_share: z.number().min(0).max(100),
   min_amount: z.number({error: 'Укажите число'}).positive(),
   max_amount: z.number({error: 'Укажите число'}).positive(),
-  min_term_months: z.number({error: 'Укажите число'}).int().positive(),
-  max_term_months: z.number({error: 'Укажите число'}).int().positive(),
-  min_rate_percent: z.number({error: 'Укажите число'}).min(0),
-  max_rate_percent: z.number({error: 'Укажите число'}).min(0),
+  min_term_months: z.number({error: 'Укажите число'}).int().min(1).max(360),
+  max_term_months: z.number({error: 'Укажите число'}).int().min(1).max(360),
+  min_rate_percent: z.number({error: 'Укажите число'}).min(0).max(100),
+  max_rate_percent: z.number({error: 'Укажите число'}).min(0).max(100),
   fixed_share: z.number().min(0).max(100),
   amount_distribution: z.enum(['lognormal', 'uniform', 'normal']),
 }).refine(values => values.min_amount < values.max_amount, {message: 'Минимум должен быть меньше максимума', path: ['max_amount']})
-  .refine(values => values.min_term_months < values.max_term_months, {message: 'Срок «от» меньше срока «до»', path: ['max_term_months']})
-  .refine(values => values.min_rate_percent < values.max_rate_percent, {message: 'Минимальная ставка меньше максимальной', path: ['max_rate_percent']})
+  .refine(values => values.min_term_months <= values.max_term_months, {message: 'Срок «от» должен быть не больше срока «до»', path: ['max_term_months']})
+  .refine(values => values.min_rate_percent <= values.max_rate_percent, {message: 'Минимальная ставка должна быть не больше максимальной', path: ['max_rate_percent']})
 
 type FormValues = z.infer<typeof schema>
 
@@ -39,7 +39,7 @@ const defaultValues: FormValues = {
   name: 'Синтетический портфель',
   portfolio_type: 'mixed',
   count: 1000,
-  valuation_date: new Date().toISOString().slice(0, 10),
+  valuation_date: new Intl.DateTimeFormat('sv-SE', {timeZone: 'Europe/Moscow'}).format(new Date()),
   seed: 42,
   credit_share: 70,
   min_amount: 100000,
@@ -77,6 +77,7 @@ export function GeneratorPage() {
         await new Promise(resolve => window.setTimeout(resolve, 500))
         run = await api<Generated & {run_id: string}>(`/runs/${run.run_id}`)
       }
+      if (run.status !== 'succeeded' || !run.result?.portfolio_id) throw new Error(run.error_summary || 'Не удалось создать портфель')
       return run
     },
     onSuccess: async data => {
@@ -103,7 +104,7 @@ export function GeneratorPage() {
         description={advanced ? 'Детальная настройка распределений и условий кредитных и депозитных сделок' : 'Сформируйте синтетический портфель с контролируемой структурой'}
         actions={advanced
           ? <Button variant="primary" size="lg" disabled={generation.isPending} onClick={submit}><Sparkles size={17} strokeWidth={2.2} /> Сгенерировать</Button>
-          : <Link to="/integrations?tab=runs"><Button variant="secondary">История генераций</Button></Link>}
+          : <Link to="/integrations?tab=runs&type=generation"><Button variant="secondary">История генераций</Button></Link>}
       />
       <Tabs items={[{label: 'Простой', to: '/generator', active: !advanced}, {label: 'Расширенный', to: '/generator?mode=advanced', active: advanced}]} />
       {generation.error && <div className="mb-5"><ErrorState message={(generation.error as Error).message} /></div>}
@@ -177,6 +178,7 @@ function ShareSlider({form, split}: {form: Form; split: {credit: number; creditC
       </div>
       <input
         type="range"
+        aria-label="Доля кредитов"
         min={0}
         max={100}
         value={credit}
@@ -191,6 +193,14 @@ function ShareSlider({form, split}: {form: Form; split: {credit: number; creditC
       </div>
     </div>
   )
+}
+
+function FixedShare({form}: {form: Form}) {
+  const fixed = form.watch('fixed_share')
+  return <Field label={`Доля FIXED ${fixed}% · FLOAT ${100 - fixed}%`} className="mt-4">
+    <input type="range" min={0} max={100} aria-label="Доля FIXED" className="lime-range"
+      style={{'--fill': `${fixed}%`} as React.CSSProperties} {...form.register('fixed_share', {valueAsNumber: true})} />
+  </Field>
 }
 
 function PreviewBar({label, value, tone = 'lime'}: {label: string; value: number; tone?: 'lime' | 'olive' | 'steel'}) {
@@ -214,8 +224,8 @@ function Simple({form, split, onGenerate, pending}: Props & {split: {credit: num
   const checks = [
     {label: `Количество сделок: ${formatCount(Number(values.count) || 0)}`, ok: Number(values.count) >= 1 && Number(values.count) <= 100000},
     {label: 'Диапазон сумм задан корректно', ok: Number(values.min_amount) < Number(values.max_amount)},
-    {label: 'Диапазон сроков задан корректно', ok: Number(values.min_term_months) < Number(values.max_term_months)},
-    {label: 'Диапазон ставок задан корректно', ok: Number(values.min_rate_percent) < Number(values.max_rate_percent)},
+    {label: 'Диапазон сроков задан корректно', ok: Number(values.min_term_months) <= Number(values.max_term_months)},
+    {label: 'Диапазон ставок задан корректно', ok: Number(values.min_rate_percent) <= Number(values.max_rate_percent)},
     {label: 'Seed задан — результат воспроизводим', ok: Number.isFinite(Number(values.seed))},
   ]
   const ready = checks.every(check => check.ok)
@@ -243,8 +253,12 @@ function Simple({form, split, onGenerate, pending}: Props & {split: {credit: num
         <div className="border-t border-border my-5" />
         <SectionHeader title="Соотношение инструментов" />
         <ShareSlider form={form} split={split} />
+        <FixedShare form={form} />
         <div className="flex justify-end gap-2.5 mt-6">
-          <Button variant="secondary" type="button" onClick={() => form.trigger()}>Проверить настройки</Button>
+          <Button variant="secondary" type="button" onClick={async () => {
+            if (await form.trigger()) toast.success('Настройки прошли проверку')
+            else toast.error('Проверьте выделенные параметры')
+          }}>Проверить настройки</Button>
           <Button variant="primary" size="lg" disabled={pending || !ready} onClick={onGenerate}>
             <Sparkles size={17} strokeWidth={2.2} /> {pending ? 'Генерация…' : 'Сгенерировать портфель'}
           </Button>
@@ -284,10 +298,23 @@ function Simple({form, split, onGenerate, pending}: Props & {split: {credit: num
   )
 }
 
+function histogramWeights(values: FormValues): number[] {
+  const {min_amount: min, max_amount: max, amount_distribution: distribution} = values
+  if (!(min > 0 && min < max)) return []
+  const count = 12
+  return Array.from({length: count}, (_, index) => {
+    const left = min + index / count * (max - min)
+    const right = min + (index + 1) / count * (max - min)
+    if (distribution === 'lognormal') return Math.log(right / left)
+    if (distribution === 'normal') return Math.exp(-0.5 * ((index + 0.5 - count / 2) / 2) ** 2)
+    return 1
+  })
+}
+
 function Advanced({form, onGenerate, pending}: Props) {
   const values = form.watch()
   const errors = form.formState.errors
-  const histogram = [18, 38, 76, 96, 84, 65, 49, 34, 24, 15, 9, 5]
+  const histogram = histogramWeights(values)
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[1.18fr_0.82fr] gap-5 items-start">
       <Card>
@@ -319,6 +346,7 @@ function Advanced({form, onGenerate, pending}: Props) {
         <div className="flex items-center gap-2 text-[11px] text-lime mt-4">
           <Check size={14} strokeWidth={2.5} /> Диапазоны и доли проверит backend перед сохранением
         </div>
+        <FixedShare form={form} />
         <div className="flex justify-end gap-2.5 mt-6">
           <Button variant="primary" size="lg" disabled={pending} onClick={onGenerate}>
             <Sparkles size={17} strokeWidth={2.2} /> {pending ? 'Генерация…' : 'Сгенерировать'}
@@ -343,11 +371,7 @@ function Advanced({form, onGenerate, pending}: Props) {
           <span>{formatCount(Number(values.max_amount) || 0)} ₽</span>
         </div>
         <SectionHeader title="Сроки кредитования" side="Настроенный диапазон" />
-        <div className="flex flex-col gap-3.5">
-          <PreviewBar label={`от ${values.min_term_months} мес.`} value={25} tone="steel" />
-          <PreviewBar label="Средний диапазон" value={50} />
-          <PreviewBar label={`до ${values.max_term_months} мес.`} value={25} tone="olive" />
-        </div>
+        <p className="text-xs text-muted">Сроки выбираются равномерно от {values.min_term_months} до {values.max_term_months} месяцев включительно.</p>
         <div className="rounded-panel bg-card2 border border-border p-3.5 mt-5 flex gap-3">
           <AlertTriangle size={16} className="text-amber shrink-0 mt-0.5" strokeWidth={1.8} />
           <div>

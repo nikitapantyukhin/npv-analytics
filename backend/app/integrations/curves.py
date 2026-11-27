@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
 
 import httpx
 
@@ -16,16 +15,26 @@ class QuantumResponse:
 
 
 class QuantumCurvesAdapter:
-    def __init__(self, base_url: str | None = None, timeout: int | None = None):
+    def __init__(self, base_url: str | None = None, timeout: int | None = None) -> None:
         settings = get_settings()
         self.base_url = (base_url or settings.quantum_base_url).rstrip("/")
         self.timeout = timeout or settings.quantum_timeout_seconds
 
-    def _request(self, method: str, path: str, **kwargs) -> QuantumResponse:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str] | None = None,
+        text: bool = False,
+        timeout: int | None = None,
+    ) -> QuantumResponse:
         try:
-            response = httpx.request(method, f"{self.base_url}{path}", timeout=self.timeout, **kwargs)
+            response = httpx.request(
+                method, f"{self.base_url}{path}", params=params, timeout=timeout or self.timeout,
+            )
             response.raise_for_status()
-            return QuantumResponse(True, response.json())
+            return QuantumResponse(True, response.content.decode("utf-8") if text else response.json())
         except (httpx.HTTPError, ValueError) as exc:
             return QuantumResponse(False, error=str(exc))
 
@@ -44,22 +53,15 @@ class QuantumCurvesAdapter:
     def get_scenario_curve(self, snapshot_id: int, scenario_id: int) -> QuantumResponse:
         return self._request("GET", f"/api/v1/curves/{snapshot_id}/scenarios/{scenario_id}")
 
+    def get_term_export(self, snapshot_id: int) -> QuantumResponse:
+        return self._request("GET", f"/api/v1/exports/curves/{snapshot_id}/moex.csv", text=True)
+
     def request_calculation(self, trade_date: str | None = None) -> QuantumResponse:
         params = {"trade_date": trade_date} if trade_date else None
-        return self._request("POST", "/api/v1/curves/calculate", params=params)
+        return self._request(
+            "POST", "/api/v1/curves/calculate", params=params,
+            timeout=get_settings().quantum_calculation_timeout_seconds,
+        )
 
     def request_rebuild(self, snapshot_id: int) -> QuantumResponse:
         return self._request("POST", f"/api/v1/curves/{snapshot_id}/rebuild")
-
-    @staticmethod
-    def normalize_points(points: list[dict]) -> list[dict]:
-        normalized = []
-        for point in points:
-            rate_percent = Decimal(str(point.get("rate", point.get("shifted_rate"))))
-            normalized.append({
-                "bucket_code": str(point["bucket_code"]),
-                "tenor_years": Decimal(str(point["tenor_years"])),
-                "rate_decimal": rate_percent / Decimal(100),
-                "shift_bp": Decimal(str(point["shift_bp"])) if point.get("shift_bp") is not None else None,
-            })
-        return normalized

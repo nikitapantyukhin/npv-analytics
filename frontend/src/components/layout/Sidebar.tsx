@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import { Briefcase, ChartSpline, LayoutDashboard, Settings, Sparkles, TrendingUp, Database } from 'lucide-react'
 import { cn } from '../../lib/utils'
@@ -26,6 +27,11 @@ function Logo() {
 
 export function Sidebar() {
   const location = useLocation()
+  const [compact, setCompact] = useState(() => localStorage.getItem('npv-compact-tables') === 'true')
+  useEffect(() => {
+    document.documentElement.toggleAttribute('data-compact-tables', compact)
+    localStorage.setItem('npv-compact-tables', String(compact))
+  }, [compact])
   const isActive = (path: string) => (path === '/overview' ? location.pathname === path : location.pathname.startsWith(path))
   return (
     <aside className="w-[250px] min-w-[250px] bg-sidebar border-r border-border min-h-screen h-screen sticky top-0 flex flex-col px-4 py-6 z-10 max-lg:w-[210px] max-lg:min-w-[210px] max-md:relative max-md:w-full max-md:min-w-0 max-md:h-auto max-md:min-h-0 max-md:border-r-0 max-md:border-b">
@@ -54,10 +60,15 @@ export function Sidebar() {
           <span className="block text-[11px] text-faint mt-0.5">Команда «пацаны»</span>
         </div>
       </div>
-      <div className="flex items-center gap-3 px-3 pt-3 border-t border-border text-muted text-xs max-md:hidden">
-        <Settings size={16} strokeWidth={1.8} />
-        <span>Настройки отображения</span>
-      </div>
+      <details className="px-3 pt-3 border-t border-border text-muted text-xs max-md:hidden">
+        <summary className="flex items-center gap-3 cursor-pointer">
+          <Settings size={16} strokeWidth={1.8} />
+          Настройки отображения
+        </summary>
+        <label className="mt-3 flex gap-2 items-center">
+          <input type="checkbox" checked={compact} onChange={event => setCompact(event.target.checked)} /> Компактные таблицы
+        </label>
+      </details>
     </aside>
   )
 }
